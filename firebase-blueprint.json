@@ -1,0 +1,133 @@
+{
+  "entities": {
+    "NexusUserSettings": {
+      "title": "NexusUserSettings",
+      "description": "Synchronized user settings, selected AI model/provider, persona, and shell input history.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner UID matching request.auth.uid" },
+        "provider": { "type": "string", "enum": ["gemini", "anthropic", "openai", "fable", "local"] },
+        "selectedModel": { "type": "string", "description": "Active model identifier" },
+        "maxTokens": { "type": "integer", "description": "Max output tokens (256-64000)" },
+        "maxSteps": { "type": "integer", "description": "Max agent loop steps per turn (1-12)" },
+        "timeoutSec": { "type": "integer", "description": "Default command timeout in seconds (1-120)" },
+        "agentPersona": { "type": "string", "description": "System instruction for the Nexus agent" },
+        "activeSessionId": { "type": "string", "description": "Currently selected session ID" },
+        "inputHistory": { "type": "array", "description": "Bounded list of up to 100 previous directives" },
+        "displayName": { "type": "string", "description": "Custom display name (0-80 chars)" },
+        "avatarDataUri": { "type": "string", "description": "Compressed 512x512 WebP avatar data URI" },
+        "fontSize": { "type": "string", "enum": ["small", "default", "large"] },
+        "responseStyle": { "type": "string", "enum": ["concise", "balanced", "detailed", "technical"] },
+        "personaPreset": { "type": "string", "description": "Selected persona preset ID" },
+        "customPersonasJson": { "type": "string", "description": "Serialized user custom personas JSON" },
+        "aboutUser": { "type": "string", "description": "What Nexus should know about the user (0-1500 chars)" },
+        "responsePreference": { "type": "string", "description": "How Nexus should respond (0-1500 chars)" },
+        "enableForNewChats": { "type": "boolean", "description": "Whether personalization is enabled for new chats" },
+        "skillsJson": { "type": "string", "description": "Serialized reusable instruction packs JSON" },
+        "skillsTokenBudget": { "type": "integer", "description": "Token budget for enabled skills (500-6000)" },
+        "recentWorkspaces": { "type": "array", "description": "Up to 5 recent workspace directory paths" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "FieldValue.serverTimestamp()" }
+      },
+      "required": [
+        "userId",
+        "provider",
+        "selectedModel",
+        "maxTokens",
+        "maxSteps",
+        "timeoutSec",
+        "agentPersona",
+        "activeSessionId",
+        "inputHistory",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "NexusSession": {
+      "title": "NexusSession",
+      "description": "Real-time synchronized shell & chat session metadata.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner UID matching request.auth.uid" },
+        "title": { "type": "string", "description": "Session display title" },
+        "status": { "type": "string", "enum": ["idle", "stream", "wait", "exec"] },
+        "cwd": { "type": "string", "description": "Persistent working directory path" },
+        "commandsCount": { "type": "integer", "description": "Executed commands count in session" },
+        "redactionsCount": { "type": "integer", "description": "Redacted secrets count in session" },
+        "provider": { "type": "string", "description": "Provider label" },
+        "model": { "type": "string", "description": "Model ID used in session" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "FieldValue.serverTimestamp()" }
+      },
+      "required": [
+        "userId",
+        "title",
+        "status",
+        "cwd",
+        "commandsCount",
+        "redactionsCount",
+        "provider",
+        "model",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "TranscriptEntry": {
+      "title": "TranscriptEntry",
+      "description": "Real-time synchronized log entry (user, agent, command approval gate, output, notice, or AI analysis).",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Owner UID matching request.auth.uid" },
+        "sessionId": { "type": "string", "description": "Parent session ID" },
+        "type": { "type": "string", "enum": ["user", "agent", "command", "output", "notice", "analysis"] },
+        "text": { "type": "string", "description": "Message, markdown, notice, or analysis text" },
+        "command": { "type": "string", "description": "Proposed shell command" },
+        "reason": { "type": "string", "description": "Explanation for command execution" },
+        "commandStatus": { "type": "string", "enum": ["", "pending", "approved", "denied", "cancelled"] },
+        "isRisky": { "type": "boolean", "description": "Whether command matched risky pattern" },
+        "timeoutSec": { "type": "integer", "description": "Command timeout in seconds" },
+        "cwd": { "type": "string", "description": "Working directory at execution" },
+        "exitCode": { "type": "integer", "description": "Process exit code" },
+        "output": { "type": "string", "description": "Redacted command stdout/stderr" },
+        "redactions": { "type": "integer", "description": "Number of secrets masked" },
+        "noticeKind": { "type": "string", "description": "Notice severity (warn, error, info)" },
+        "sequence": { "type": "integer", "description": "Ordering sequence number" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "FieldValue.serverTimestamp()" },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "FieldValue.serverTimestamp()" }
+      },
+      "required": [
+        "userId",
+        "sessionId",
+        "type",
+        "text",
+        "command",
+        "reason",
+        "commandStatus",
+        "isRisky",
+        "timeoutSec",
+        "cwd",
+        "exitCode",
+        "output",
+        "redactions",
+        "noticeKind",
+        "sequence",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/NexusUserSettings" },
+      "description": "Per-user synchronized Nexus v5 settings and input history."
+    },
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/NexusSession" },
+      "description": "Per-user synchronized shell and agent sessions."
+    },
+    "/users/{userId}/sessions/{sessionId}/entries/{entryId}": {
+      "schema": { "$ref": "#/entities/TranscriptEntry" },
+      "description": "Real-time transcript entries and command permission gates within a session."
+    }
+  }
+}

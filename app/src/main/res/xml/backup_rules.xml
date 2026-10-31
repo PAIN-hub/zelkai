@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="sharedpref" path="nexus_personal_api_keys.xml" />
+    <exclude domain="sharedpref" path="nexus_encrypted_api_keys.xml" />
+    <exclude domain="sharedpref" path="nexus_model_selection_mirror.xml" />
+    <exclude domain="file" path="datastore/" />
+    <exclude domain="file" path="models/" />
+</full-backup-content>

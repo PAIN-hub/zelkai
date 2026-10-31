@@ -1,0 +1,6 @@
+{
+  "name": "Nexus Agent v5",
+  "description": "Multi-model AI agent terminal & command workspace with real-time cloud synchronization, Gemini intelligence, and interactive tool approval.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

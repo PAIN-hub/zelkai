@@ -1,0 +1,205 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1: Global Default-Deny Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable Hardened Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Validation Helper 1: NexusUserSettings
+    function isValidNexusUserSettings(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.provider is string && data.provider in ['gemini', 'anthropic', 'openai', 'fable', 'local'] &&
+             data.selectedModel is string && data.selectedModel.size() >= 1 && data.selectedModel.size() <= 120 &&
+             data.maxTokens is int && data.maxTokens >= 256 && data.maxTokens <= 64000 &&
+             data.maxSteps is int && data.maxSteps >= 1 && data.maxSteps <= 12 &&
+             data.timeoutSec is int && data.timeoutSec >= 1 && data.timeoutSec <= 120 &&
+             data.agentPersona is string && data.agentPersona.size() >= 1 && data.agentPersona.size() <= 2000 &&
+             data.activeSessionId is string && data.activeSessionId.size() <= 128 &&
+             data.inputHistory is list && data.inputHistory.size() <= 100 &&
+             (data.inputHistory.size() == 0 || (data.inputHistory[0] is string && data.inputHistory[0].size() <= 2000)) &&
+             (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 80)) &&
+             (!('avatarDataUri' in data) || (data.avatarDataUri is string && data.avatarDataUri.size() <= 350000)) &&
+             (!('fontSize' in data) || (data.fontSize is string && data.fontSize in ['small', 'default', 'large'])) &&
+             (!('responseStyle' in data) || (data.responseStyle is string && data.responseStyle in ['concise', 'balanced', 'detailed', 'technical'])) &&
+             (!('personaPreset' in data) || (data.personaPreset is string && data.personaPreset.size() <= 64)) &&
+             (!('customPersonasJson' in data) || (data.customPersonasJson is string && data.customPersonasJson.size() <= 50000)) &&
+             (!('aboutUser' in data) || (data.aboutUser is string && data.aboutUser.size() <= 1500)) &&
+             (!('responsePreference' in data) || (data.responsePreference is string && data.responsePreference.size() <= 1500)) &&
+             (!('enableForNewChats' in data) || (data.enableForNewChats is bool)) &&
+             (!('skillsJson' in data) || (data.skillsJson is string && data.skillsJson.size() <= 100000)) &&
+             (!('skillsTokenBudget' in data) || (data.skillsTokenBudget is int && data.skillsTokenBudget >= 500 && data.skillsTokenBudget <= 6000)) &&
+             (!('recentWorkspaces' in data) || (data.recentWorkspaces is list && data.recentWorkspaces.size() <= 5)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // Validation Helper 2: NexusSession
+    function isValidNexusSession(data) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+             data.status is string && data.status in ['idle', 'stream', 'wait', 'exec'] &&
+             data.cwd is string && data.cwd.size() >= 1 && data.cwd.size() <= 512 &&
+             data.commandsCount is int && data.commandsCount >= 0 && data.commandsCount <= 100000 &&
+             data.redactionsCount is int && data.redactionsCount >= 0 && data.redactionsCount <= 100000 &&
+             data.provider is string && data.provider.size() >= 1 && data.provider.size() <= 40 &&
+             data.model is string && data.model.size() >= 1 && data.model.size() <= 120 &&
+             (!('projectSlug' in data) || (data.projectSlug is string && data.projectSlug.size() <= 64 && (data.projectSlug == '' || data.projectSlug.matches('^[a-z0-9\\-]+$')))) &&
+             (!('storageLocation' in data) || (data.storageLocation is string && data.storageLocation in ['shared_storage', 'termux_home_mirrored', 'temp_scratch'])) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // Validation Helper 3: TranscriptEntry
+    function isValidTranscriptEntry(data, sessionId) {
+      return data.userId is string && data.userId == request.auth.uid &&
+             data.sessionId is string && data.sessionId == sessionId &&
+             data.type is string && data.type in ['user', 'agent', 'command', 'output', 'notice', 'analysis'] &&
+             data.text is string && data.text.size() <= 20000 &&
+             data.command is string && data.command.size() <= 2000 &&
+             data.reason is string && data.reason.size() <= 1000 &&
+             data.commandStatus is string && data.commandStatus in ['', 'pending', 'approved', 'denied', 'cancelled'] &&
+             data.isRisky is bool &&
+             data.timeoutSec is int && data.timeoutSec >= 0 && data.timeoutSec <= 600 &&
+             data.cwd is string && data.cwd.size() <= 512 &&
+             data.exitCode is int && data.exitCode >= -999 && data.exitCode <= 999 &&
+             data.output is string && data.output.size() <= 20000 &&
+             data.redactions is int && data.redactions >= 0 && data.redactions <= 100000 &&
+             data.noticeKind is string && data.noticeKind.size() <= 40 &&
+             data.sequence is int && data.sequence >= 0 && data.sequence <= 1000000 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId);
+      allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       incoming().keys().hasAll([
+                         'userId', 'provider', 'selectedModel', 'maxTokens', 'maxSteps',
+                         'timeoutSec', 'agentPersona', 'activeSessionId', 'inputHistory',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'userId', 'provider', 'selectedModel', 'maxTokens', 'maxSteps',
+                         'timeoutSec', 'agentPersona', 'activeSessionId', 'inputHistory',
+                         'displayName', 'avatarDataUri', 'fontSize', 'responseStyle',
+                         'personaPreset', 'customPersonasJson', 'aboutUser', 'responsePreference',
+                         'enableForNewChats', 'skillsJson', 'skillsTokenBudget', 'recentWorkspaces',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidNexusUserSettings(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidNexusUserSettings(incoming()) &&
+                       request.auth.uid == userId &&
+                       isValidId(userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'provider', 'selectedModel', 'maxTokens', 'maxSteps',
+                         'timeoutSec', 'agentPersona', 'activeSessionId', 'inputHistory',
+                         'displayName', 'avatarDataUri', 'fontSize', 'responseStyle',
+                         'personaPreset', 'customPersonasJson', 'aboutUser', 'responsePreference',
+                         'enableForNewChats', 'skillsJson', 'skillsTokenBudget', 'recentWorkspaces',
+                         'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId);
+
+      match /sessions/{sessionId} {
+        allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(sessionId);
+        allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+
+        allow create: if isSignedIn() &&
+                         request.auth.uid == userId &&
+                         isValidId(userId) &&
+                         isValidId(sessionId) &&
+                         incoming().keys().hasAll([
+                           'userId', 'title', 'status', 'cwd', 'commandsCount',
+                           'redactionsCount', 'provider', 'model', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'title', 'status', 'cwd', 'commandsCount',
+                           'redactionsCount', 'provider', 'model', 'projectSlug', 'storageLocation',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidNexusSession(incoming());
+
+        allow update: if isSignedIn() &&
+                         isValidNexusSession(incoming()) &&
+                         request.auth.uid == userId &&
+                         isValidId(userId) &&
+                         isValidId(sessionId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'status', 'cwd', 'commandsCount',
+                           'redactionsCount', 'provider', 'model', 'projectSlug', 'storageLocation',
+                           'updatedAt'
+                         ]);
+
+        allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(sessionId);
+
+        match /entries/{entryId} {
+          allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(sessionId) && isValidId(entryId);
+          allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+
+          allow create: if isSignedIn() &&
+                           request.auth.uid == userId &&
+                           isValidId(userId) &&
+                           isValidId(sessionId) &&
+                           isValidId(entryId) &&
+                           incoming().keys().hasAll([
+                             'userId', 'sessionId', 'type', 'text', 'command', 'reason',
+                             'commandStatus', 'isRisky', 'timeoutSec', 'cwd', 'exitCode',
+                             'output', 'redactions', 'noticeKind', 'sequence', 'createdAt', 'updatedAt'
+                           ]) &&
+                           incoming().keys().hasOnly([
+                             'userId', 'sessionId', 'type', 'text', 'command', 'reason',
+                             'commandStatus', 'isRisky', 'timeoutSec', 'cwd', 'exitCode',
+                             'output', 'redactions', 'noticeKind', 'sequence', 'createdAt', 'updatedAt'
+                           ]) &&
+                           isValidTranscriptEntry(incoming(), sessionId);
+
+          allow update: if isSignedIn() &&
+                           isValidTranscriptEntry(incoming(), sessionId) &&
+                           request.auth.uid == userId &&
+                           isValidId(userId) &&
+                           isValidId(sessionId) &&
+                           isValidId(entryId) &&
+                           incoming().userId == existing().userId &&
+                           incoming().sessionId == existing().sessionId &&
+                           incoming().type == existing().type &&
+                           incoming().sequence == existing().sequence &&
+                           incoming().createdAt == existing().createdAt &&
+                           incoming().diff(existing()).affectedKeys().hasOnly([
+                             'text', 'commandStatus', 'cwd', 'exitCode', 'output', 'redactions', 'updatedAt'
+                           ]);
+
+          allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(sessionId) && isValidId(entryId);
+        }
+      }
+    }
+  }
+}
