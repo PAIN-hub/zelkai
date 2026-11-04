@@ -3598,6 +3598,7 @@ class NexusViewModel(
                 val curSession = currentSessionModel()
                 val isDefaultTitle = curSession != null && (
                     curSession.title.equals("New chat", ignoreCase = true) ||
+                        curSession.title.startsWith("Zelkai Shell") ||
                         curSession.title.startsWith("Nexus Shell") ||
                         curSession.title.startsWith("Guest Shell")
                     )

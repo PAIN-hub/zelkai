@@ -1,6 +1,6 @@
-# Nexus Agent v5 — Build, Test & Runtime Instructions
+# ZELKAI (formerly Nexus Agent) — Build, Test & Runtime Instructions
 
-This document covers environment prerequisites, dependency setup, native `llama.cpp` build configuration, unit/instrumented test execution, 16 KB ELF alignment verification, the Agent Timeline UI refactor, and root-cause findings for the 5 resolved blockers in **Nexus Agent v5**.
+This document covers environment prerequisites, dependency setup, native `llama.cpp` build configuration, unit/instrumented test execution, 16 KB ELF alignment verification, the Agent Timeline UI refactor, startup crash guards, and wireless debugging / logcat capture for **ZELKAI** (`com.zelkai.devagent`).
 
 ---
 
@@ -9,7 +9,7 @@ This document covers environment prerequisites, dependency setup, native `llama.
 - **JDK**: Java 17+ (OpenJDK 17 or 21 recommended)
 - **Android SDK**:
   - `compileSdk = 35` (`android-35`)
-  - `build-tools = 36.1.0` (or `36.0.0+`)
+  - `build-tools = 36.1.0` (or `35.0.0+`)
 - **Android NDK (Side-by-Side)**:
   - `27.2.12479018` (configured in `:llama` and `app`)
 - **CMake**:
@@ -58,7 +58,8 @@ keytool -genkeypair -v -keystore my-upload-key.jks \
 ## 4. Running Tests
 
 ### Run Unit Tests (JVM)
-Executes all test suites (`TurnTimelineUnitTest`, `GenerationOutcomeUnitTest`, `RamPolicyUnitTest`, `TopBarStatusUnitTest`, `LlamaRuntimeUnitTest`, `ExampleUnitTest`, `ExampleRobolectricTest`):
+Executes `LlamaRuntimeUnitTest` covering `FakeEngine`, `EngineProvider` selection & fallback, `LlamaEngine` load guards (missing file, corrupt GGUF magic, size mismatch, unsupported architecture, OOM guard, `<500ms` stop, `onTrimMemory`, idle timeout), `<think>...</think>` streaming parser, multi-byte UTF-8 boundary decoding, history token trimming, and `NexusViewModel` typed error card mapping:
+
 ```bash
 ./gradlew testDebugUnitTest
 ```
@@ -106,33 +107,44 @@ unzip -l app/build/outputs/apk/release/app-release.apk | grep '\.so'
 
 ---
 
-## 7. Findings & Root Causes for Blockers A–E
+## 7. Wireless Debugging & ADB Logcat Capture
 
-| Area | Symptom | Evidence (`file:line`) | Root Cause |
-| :--- | :--- | :--- | :--- |
-| **A) Google Sign-In** | Account picker appears, then app returns to sign-in screen with no error and no loader. | `AuthScreen.kt:80-145`, `AuthViewModel.kt:180` | Transient post-login Firestore bootstrap or profile creation failures were caught in the top-level catch block and treated as authentication failures, signing out or navigating back. Fixed by deciding auth success **ONLY** by Firebase Auth, surfacing a non-blocking `"Signed in, but sync failed · Retry"` banner if post-login sync fails, adding 5-step `AuthDiagnostics`, and providing "Copy diagnostics". |
-| **B) New Chat** | Tapping "New chat" failed to show empty draft, did not close drawer, or crashed on Firestore listener error. | `NexusViewModel.kt:3225`, `NexusMainScreen.kt:700` | Eager remote Firestore session insertion triggered rules or snapshot listeners on empty chats before any message was sent. Fixed by storing draft sessions lazily in local state until the first message, immediately closing drawer, resetting stream state, and offering multi-chat lock explanation dialog to guests. |
-| **C) Empty Model Response** | App reported `"Model returned an empty response"` during tool calls or pure reasoning turns. | `NexusViewModel.kt:3995-4085`, `GenerationOutcome.kt:26-95` | Generation outcome was classified only after aggressively stripping tool syntax and `<think>` blocks; when the model produced tool calls or reasoning only, stripped visible text was empty and misclassified as an error. Fixed with sealed `GenerationOutcome` (`ToolCallsOnly` is valid turn; `ReasoningOnly` triggers 1 auto-follow-up turn; `NoTokens` resets engine and retries once). |
-| **D) Long-Running Commands** | Background build or server commands timed out at 120s or blocked UI agent turn indefinitely. | `JobManager.kt:140`, `CommandExecutionPolicy.kt:1-90` | Commands lacked policy-based execution; long-running processes ran synchronously in the foreground thread. Fixed with `CommandExecutionPolicy` (`FOREGROUND` 120s with exit 124 timeout hint, `TRACKED` detached job awaited up to 15m, `SERVICE` server job with ready port probes), tool grammar for `wait_for_job`, and `AgentResumeCoordinator`. |
-| **E) Top Status Indicator** | Outdated `"Free plan"` or `"Guest · Sign in"` pill occupied top editorial center bar. | `NexusEditorialTopBar.kt:120`, `NexusComponents.kt:135`, `AgentStatus.kt:12-32` | Top center pill was hardcoded to billing/guest state rather than live agent operational phase. Fixed by replacing with high-visibility center pill driven by sealed `AgentStatus` (`Idle` "Ready", `Working(phase)` animated dot + "Thinking"/"Writing"/"Running command", `Error`), moving guest quota inline near composer when `<= 2` prompts left. |
+To capture crash logs or runtime output via Wireless Debugging:
+
+1. **Connect via Wireless Debugging**:
+   On your phone, go to **Developer options > Wireless debugging** and note the IP and Port:
+   ```bash
+   export PATH=$PATH:/home/madara/Android/Sdk/platform-tools
+   adb connect <device-ip>:<port>
+   adb devices
+   ```
+
+2. **Stream Real-time Logcat for ZELKAI**:
+   ```bash
+   adb logcat -v time --pid=$(adb shell pidof -s com.zelkai.devagent)
+   ```
+   Or capture crashes with stack traces:
+   ```bash
+   adb logcat -b crash -d
+   ```
+
+3. **Install Built APK Directly over Wireless ADB**:
+   ```bash
+   adb install -r app/build/outputs/apk/debug/app-debug.apk
+   ```
 
 ---
 
-## 8. Total Device RAM Budgeting & Load Guards
+## 8. Startup Crash Guards & Resilience
 
-- **Budgeting Basis**: All model sizing, recommendation scoring, and load limits derive strictly from **Total Device RAM** (`MemTotal` / `MemoryInfo.totalMem`), adjusted at most 1 step by SoC class (`RamClass`), rather than transient free memory.
-- **Formulas**:
-  - `RamClass`: `LOW (<=3 GB)`, `MID (4 GB)`, `MID_PLUS (6 GB)`, `HIGH (8 GB)`, `HIGH_PLUS (12 GB)`, `ULTRA (16 GB+)`
-  - `hardCap = 0.70 * totalRam`
-  - `footprint = modelFileSize + kvCache + 12% overhead`
-- **Load Guard**: Hard block loading **ONLY** when `footprint > hardCap`. If system `lowMemory` flag is active, show soft warning card (`LowMemoryWarning`) with `"Load anyway"` override.
+1. **Non-blocking Native Inference Initialization**:
+   - `EngineProvider.initialize` is now invoked asynchronously via `lifecycleScope.launch(Dispatchers.IO)` with `runCatching` rather than synchronously blocking `MainActivity.onCreate()`.
+   - The app launches immediately into interactive UI and falls back gracefully to `StubEngine` if native libraries are unavailable or blocked.
 
----
+2. **Resilient Firebase / AppCheck Fallback**:
+   - `configureAppCheck` is wrapped in `runCatching`.
+   - `AppNavigation` safely resolves `Firebase.auth` via `runCatching { Firebase.auth }.getOrNull()`, falling back to guest mode rather than throwing `IllegalStateException: Default FirebaseApp is not initialized`.
 
-## 9. Agent Timeline Interaction Pattern
+3. **Redacted Crash Reporter**:
+   - If an unhandled exception occurs on any thread, `installRedactedUncaughtExceptionHandler()` intercepts it, redacts all secrets, writes a recovery summary to `SharedPreferences`, and displays a recovery banner on the subsequent launch.
 
-- **Thought Process Row (`ThinkingRow`)**: Muted brain vector icon + `"Thought Process"` + chevron. Shown only when reasoning text exists (`<think>` or cloud thinking). Displays live duration timer during streaming and `"Thought for 8s"` when finished. Excluded from history sent back to the model.
-- **Tool Group Row (`ToolGroupRow`)**: 48dp header with Lucide lightning bolt icon + count badge + chevron (`"Running… (2 of 3)"`, `"Waiting for your approval"`, `"Ran 3 commands"`, `"Completed 4 steps"`, `"Ran 3 commands · 1 failed"`).
-- **Curved Tree Connector**: Custom Canvas bezier connector (`╰`) linking the header down through each step, with bullet dots `•`, plain-language step titles, duration, and expandable output viewer (capped at 200 lines).
-- **Animated Working Indicator (`AgentWorkingIndicator`)**: 4 animated waving dots (`••••`) during active agent turns when no visible text is streaming, displaying `"Loading model…"` during on-device weights loading.
-- **Typography & Theme**: Poppins + JetBrains Mono, clean Light/White default palette, and 100% monochrome Lucide vector stroke icons (zero emojis).

@@ -15,7 +15,7 @@ android {
   ndkVersion = "27.2.12479018"
 
   defaultConfig {
-    applicationId = "com.aistudio.nexusagent.v5sync"
+    applicationId = "com.zelkai.devagent"
     minSdk = 24
     targetSdk = 36
     versionCode = 1

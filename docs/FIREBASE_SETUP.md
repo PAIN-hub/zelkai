@@ -19,15 +19,15 @@ This guide provides step-by-step instructions to configure your own Firebase pro
 2. Click **Add app** > select the **Android** platform icon.
 3. Enter the exact Android package name:
    ```
-   com.aistudio.nexusagent.v5sync
+   com.zelkai.devagent
    ```
-4. Enter an App nickname (e.g., `Nexus Agent v5`).
+4. Enter an App nickname (e.g., `Zelkai`).
 
 ### Required Configuration Match Table
 
 | Field | Required Value | Where Configured / Verified |
 | :--- | :--- | :--- |
-| **Package Name (`applicationId`)** | `com.aistudio.nexusagent.v5sync` | `app/build.gradle.kts`, `app/google-services.json` |
+| **Package Name (`applicationId`)** | `com.zelkai.devagent` | `app/build.gradle.kts`, `app/google-services.json` |
 | **Debug Keystore SHA-1** | `82:7D:D6:EC:05:17:6F:2D:EA:87:7A:DA:5A:E0:41:71:D4:AB:D6:F4` | Firebase Console > Project Settings > Android App SHA fingerprints |
 | **Debug Keystore SHA-256** | `49:47:85:37:B1:89:F0:2F:AC:C1:22:16:94:8E:6E:28:9D:31:11:2D:02:A9:2B:A2:88:9C:62:D4:C2:FF:28:92` | Firebase Console > Project Settings > Android App SHA fingerprints |
 | **Release Keystore SHA-1** | `14:EC:D8:29:0E:16:C3:D8:29:EC:31:10:2D:0D:D1:99:A6:B1:12:E3` | Firebase Console > Project Settings > Android App SHA fingerprints |
@@ -56,7 +56,7 @@ keytool -list -v -keystore my-upload-key.jks -alias upload -storepass android -k
 1. In Firebase Console, download the updated `google-services.json` file.
 2. Place it at `/app/google-services.json` in this repository.
 3. Verify that the file contains:
-   - Your package name `com.aistudio.nexusagent.v5sync`
+   - Your package name `com.zelkai.devagent`
    - An `oauth_client` with `client_type: 3` (this is the Web/Server Client ID used by Credential Manager).
 
 ---

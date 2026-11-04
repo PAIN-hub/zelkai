@@ -2160,9 +2160,17 @@ fun AboutSettingsSubpage(
             ) {
                 NexusLogoIcon(modifier = Modifier.size(54.dp))
                 Text(
-                    text = "Nexus Agent v5",
-                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                    text = "ZELKAI",
+                    style = MaterialTheme.typography.titleLarge.copy(
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp
+                    ),
                     color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "The AI Coding Assistant",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Text(
                     text = "Version ${BuildConfig.VERSION_NAME} (${if (BuildConfig.DEBUG) "Debug" else "Release"} Build)",

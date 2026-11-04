@@ -2704,7 +2704,7 @@ private fun exportTranscript(
     clipboard.setText(AnnotatedString(content))
     val sendIntent = Intent(Intent.ACTION_SEND).apply {
         type = if (format == "json") "application/json" else "text/markdown"
-        putExtra(Intent.EXTRA_SUBJECT, "Nexus Session Export ($format)")
+        putExtra(Intent.EXTRA_SUBJECT, "Zelkai Session Export ($format)")
         putExtra(Intent.EXTRA_TEXT, content)
     }
     context.startActivity(Intent.createChooser(sendIntent, "Export Nexus Session"))

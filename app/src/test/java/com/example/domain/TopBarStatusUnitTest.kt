@@ -27,6 +27,7 @@ class TopBarStatusUnitTest {
             val content = stringsFile.readText()
             assertFalse("strings.xml must not contain 'Free plan'", content.contains("Free plan", ignoreCase = true))
             assertFalse("strings.xml must not contain 'Guest · Sign in'", content.contains("Guest · Sign in", ignoreCase = true))
+            org.junit.Assert.assertTrue("strings.xml must define app_name as ZELKAI", content.contains(">ZELKAI<") || content.contains(">Zelkai<"))
         }
     }
 }

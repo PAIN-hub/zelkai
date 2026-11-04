@@ -29,6 +29,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
 import com.example.domain.EngineProvider
 import com.example.domain.LocalLlmManager
 import com.example.domain.NexusToolAndRedactor
@@ -41,9 +42,12 @@ import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.auth
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 
 internal fun FirebaseAuth.authStateFlow(): Flow<FirebaseUser?> = callbackFlow {
     val listener = FirebaseAuth.AuthStateListener { auth ->
@@ -60,11 +64,13 @@ class MainActivity : ComponentActivity() {
         // STEP 0: Install redacted uncaught exception handler (Part E) so crashes never leak API keys or raw stack traces
         installRedactedUncaughtExceptionHandler()
 
-        // Initialize on-device inference runtime safely (falls back to StubEngine on non-ARM64/emulator)
-        EngineProvider.initialize(applicationContext)
-
         // STEP 1: Mandatory App Check configuration with launch intent before any UI or Firebase calls
-        configureAppCheck(this, intent)
+        runCatching { configureAppCheck(this, intent) }
+
+        // Initialize on-device inference runtime asynchronously (falls back to StubEngine on non-ARM64/emulator)
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching { EngineProvider.initialize(applicationContext) }
+        }
 
         enableEdgeToEdge()
 
@@ -231,10 +237,11 @@ fun AppNavigation(
     onToggleTheme: () -> Unit = {},
     onSelectThemeMode: (NexusThemeMode) -> Unit = {},
     onSelectFontScale: (Float) -> Unit = {},
-    auth: FirebaseAuth = Firebase.auth
+    auth: FirebaseAuth? = runCatching { Firebase.auth }.getOrNull()
 ) {
-    val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
-    var isGuestMode by remember { mutableStateOf(false) }
+    val currentUser by (auth?.authStateFlow() ?: flowOf(null))
+        .collectAsStateWithLifecycle(initialValue = auth?.currentUser)
+    var isGuestMode by remember { mutableStateOf(auth == null) }
     val user = currentUser
 
     if (user == null && !isGuestMode) {

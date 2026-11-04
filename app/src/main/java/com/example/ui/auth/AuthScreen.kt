@@ -62,6 +62,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -473,20 +474,21 @@ fun AuthScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    // 1. Emblem & Headline
+                    // 1. Cover Photo Banner & Headline
+                    val coverRes = if (isDark) R.drawable.zelkai_cover_dark else R.drawable.zelkai_cover_light
                     Surface(
-                        modifier = Modifier.size(60.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(130.dp),
                         shape = RoundedCornerShape(16.dp),
-                        color = Color.White,
                         border = BorderStroke(1.dp, borderHairline),
-                        shadowElevation = 3.dp
+                        shadowElevation = 2.dp
                     ) {
                         Image(
-                            painter = painterResource(id = R.drawable.nexus_app_icon),
-                            contentDescription = "Nexus Agent Emblem",
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(6.dp)
+                            painter = painterResource(id = coverRes),
+                            contentDescription = "ZELKAI The AI Coding Assistant",
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
                         )
                     }
 
@@ -495,19 +497,21 @@ fun AuthScreen(
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         Text(
-                            text = "Nexus Agent v5",
+                            text = "ZELKAI",
                             style = MaterialTheme.typography.headlineMedium.copy(
                                 fontFamily = PoppinsFontFamily,
                                 fontWeight = FontWeight.Bold,
-                                fontSize = 24.sp
+                                fontSize = 24.sp,
+                                letterSpacing = 1.sp
                             ),
                             color = textPrimary,
                             textAlign = TextAlign.Center
                         )
                         Text(
-                            text = "Chat with Gemini, Claude, OpenAI, or on-device models. You approve every risky command.",
+                            text = "The AI Coding Assistant",
                             style = MaterialTheme.typography.bodyMedium.copy(
                                 fontFamily = PoppinsFontFamily,
+                                fontWeight = FontWeight.Medium,
                                 fontSize = 13.5.sp,
                                 lineHeight = 19.sp
                             ),
@@ -1086,39 +1090,17 @@ private fun InlineAuthAlert(
 }
 
 /**
- * Shared Nexus emblem icon used across Auth, EmptyState, Sidebar, and Settings.
+ * Shared Zelkai emblem icon used across Auth, EmptyState, Sidebar, and Settings.
  */
 @Composable
 fun NexusLogoIcon(modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .clip(RoundedCornerShape(26))
-            .background(
-                Brush.linearGradient(
-                    colors = listOf(
-                        Color(0xFF2563EB),
-                        Color(0xFF7C3AED),
-                        Color(0xFF06B6D4)
-                    )
-                )
-            ),
-        contentAlignment = Alignment.Center
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize().padding(4.dp)) {
-            val strokeWidth = size.minDimension * 0.08f
-            drawCircle(
-                color = Color.White.copy(alpha = 0.22f),
-                radius = size.minDimension * 0.40f,
-                style = androidx.compose.ui.graphics.drawscope.Stroke(width = strokeWidth)
-            )
-        }
-        Icon(
-            imageVector = Icons.Default.Terminal,
-            contentDescription = "Nexus Emblem",
-            tint = Color.White,
-            modifier = Modifier.fillMaxSize(0.55f)
-        )
-    }
+    val isDark = isSystemInDarkTheme()
+    val logoRes = if (isDark) R.drawable.zelkai_logo_dark else R.drawable.zelkai_logo_light
+    Image(
+        painter = painterResource(id = logoRes),
+        contentDescription = "ZELKAI Emblem",
+        modifier = modifier.clip(RoundedCornerShape(8.dp))
+    )
 }
 
 /**

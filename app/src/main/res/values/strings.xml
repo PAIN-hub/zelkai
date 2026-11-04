@@ -1,6 +1,6 @@
 <resources>
-    <string name="app_name">Nexus Agent v5</string>
-    <string name="auth_headline">Your AI agent for Android</string>
+    <string name="app_name">ZELKAI</string>
+    <string name="auth_headline">ZELKAI — The AI Coding Assistant</string>
     <string name="auth_subtitle">Chat with Gemini, Claude, OpenAI, or on-device models. You approve every risky command.</string>
     <string name="sign_in_with_google">Continue with Google</string>
     <string name="sign_in_with_email">Continue with email</string>
@@ -25,7 +25,7 @@
     <string name="bridge_offline">Offline</string>
 
     <!-- Inputs & Actions -->
-    <string name="prompt_input_hint">Message Nexus — ↑/↓ recalls earlier directives</string>
+    <string name="prompt_input_hint">Message Zelkai — ↑/↓ recalls earlier directives</string>
     <string name="btn_run">Run</string>
     <string name="btn_stop">Stop</string>
     <string name="btn_approve_run">Approve &amp; run</string>

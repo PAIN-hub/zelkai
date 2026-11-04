@@ -37,7 +37,7 @@ class NexusNotificationHelper(private val context: Context) {
                 "AI Command Approval Requests",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
-                description = "Alerts when the Nexus AI Agent proposes a bash command and requires your permission."
+                description = "Alerts when the Zelkai AI Agent proposes a bash command and requires your permission."
                 enableVibration(true)
             }
 

@@ -322,7 +322,7 @@ fun NexusSidebar(
                     ) {
                         NexusLogoIcon(modifier = Modifier.size(28.dp))
                         Text(
-                            text = "Nexus",
+                            text = "ZELKAI",
                             style = MaterialTheme.typography.titleLarge.copy(
                                 fontWeight = FontWeight.SemiBold,
                                 letterSpacing = (-0.3).sp

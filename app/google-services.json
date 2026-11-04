@@ -46,7 +46,7 @@
       "client_info": {
         "mobilesdk_app_id": "1:1025148194517:android:65305749637b60b965dc5c",
         "android_client_info": {
-          "package_name": "com.aistudio.nexusagent.v5sync"
+          "package_name": "com.zelkai.devagent"
         }
       },
       "oauth_client": [
@@ -54,7 +54,7 @@
           "client_id": "1025148194517-3p08sj9l4h99fm64oomsmb2etoslp5j5.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
-            "package_name": "com.aistudio.nexusagent.v5sync",
+            "package_name": "com.zelkai.devagent",
             "certificate_hash": "41ba4f898557717cd6423239beb8eeaa46025016"
           }
         },
