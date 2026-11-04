@@ -266,7 +266,7 @@ fun ToolGroupRow(
         mutableStateOf(defaultExpanded)
     }
 
-    val expandedStepIds = rememberSaveable { mutableStateMapOf<String, Boolean>() }
+    val expandedStepIds = remember { mutableStateMapOf<String, Boolean>() }
 
     val rotationAngle by animateFloatAsState(
         targetValue = if (isGroupExpanded) 90f else 0f,
