@@ -1,11 +1,21 @@
 package com.example.domain
 
 import android.content.Context
+import android.os.Debug
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -15,10 +25,15 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+private val Context.benchmarkDataStore: DataStore<Preferences> by preferencesDataStore(
+    name = "nexus_model_benchmarks_ds"
+)
+
 data class ModelBenchmarkResult(
     val deviceId: String,
     val modelId: String,
     val runtime: String,
+    val engineVersion: String = LlamaEngine.LLAMA_CPP_TAG,
     val osFingerprint: String,
     val ttftMs: Long,
     val tokensPerSec: Double,
@@ -27,12 +42,15 @@ data class ModelBenchmarkResult(
     val cpuTokensPerSec: Double,
     val vulkanTokensPerSec: Double,
     val vulkanFasterThanCpu: Boolean,
+    val timedRunsCount: Int = 3,
+    val retriedSmallerConfig: Boolean = false,
     val timestampMs: Long = System.currentTimeMillis()
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("deviceId", deviceId)
         put("modelId", modelId)
         put("runtime", runtime)
+        put("engineVersion", engineVersion)
         put("osFingerprint", osFingerprint)
         put("ttftMs", ttftMs)
         put("tokensPerSec", tokensPerSec)
@@ -41,6 +59,8 @@ data class ModelBenchmarkResult(
         put("cpuTokensPerSec", cpuTokensPerSec)
         put("vulkanTokensPerSec", vulkanTokensPerSec)
         put("vulkanFasterThanCpu", vulkanFasterThanCpu)
+        put("timedRunsCount", timedRunsCount)
+        put("retriedSmallerConfig", retriedSmallerConfig)
         put("timestampMs", timestampMs)
     }
 
@@ -49,7 +69,8 @@ data class ModelBenchmarkResult(
             return ModelBenchmarkResult(
                 deviceId = obj.optString("deviceId", ""),
                 modelId = obj.optString("modelId", ""),
-                runtime = obj.optString("runtime", "llama.cpp-gguf"),
+                runtime = obj.optString("runtime", "llama.cpp"),
+                engineVersion = obj.optString("engineVersion", LlamaEngine.LLAMA_CPP_TAG),
                 osFingerprint = obj.optString("osFingerprint", ""),
                 ttftMs = obj.optLong("ttftMs", 0L),
                 tokensPerSec = obj.optDouble("tokensPerSec", 0.0),
@@ -58,6 +79,8 @@ data class ModelBenchmarkResult(
                 cpuTokensPerSec = obj.optDouble("cpuTokensPerSec", 0.0),
                 vulkanTokensPerSec = obj.optDouble("vulkanTokensPerSec", 0.0),
                 vulkanFasterThanCpu = obj.optBoolean("vulkanFasterThanCpu", false),
+                timedRunsCount = obj.optInt("timedRunsCount", 3),
+                retriedSmallerConfig = obj.optBoolean("retriedSmallerConfig", false),
                 timestampMs = obj.optLong("timestampMs", 0L)
             )
         }
@@ -106,12 +129,16 @@ sealed interface ModelLoadResult {
         val modelName: String,
         val requiredRamGb: Double,
         val availableRamGb: Double,
-        val userMessage: String
+        val userMessage: String,
+        val suggestedModelId: String? = null
     ) : ModelLoadResult
 
     data class EngineFailure(
         val modelId: String,
-        val reason: String
+        val reason: String,
+        val errorKind: LocalRuntimeErrorKind = LocalRuntimeErrorKind.GENERATION_FAILED,
+        val userTitle: String = "Model load failed",
+        val suggestedActionLabel: String = "Retry"
     ) : ModelLoadResult
 }
 
@@ -130,11 +157,55 @@ class InferenceOptimizer(private val context: Context) {
 
     companion object {
         const val IDLE_UNLOAD_TIMEOUT_MS = 5 * 60 * 1000L
+        const val BENCHMARK_TIMED_RUNS = 3
         const val BENCHMARK_FIXED_PROMPT =
             "Write a non-interactive POSIX shell command to list the top 5 largest files in the current directory."
+
+        /**
+         * Reads real process memory statistics (in MB) from `/proc/self/status` (`VmHWM`, `VmRSS`)
+         * and `android.os.Debug.getNativeHeapAllocatedSize()` + JVM heap.
+         * Never uses formula estimates based on model size.
+         */
+        fun measureRealProcessPeakMemoryMb(): Long {
+            var procPeakMb = 0L
+            runCatching {
+                val statusFile = File("/proc/self/status")
+                if (statusFile.exists() && statusFile.canRead()) {
+                    var vmHwmKb = 0L
+                    var vmRssKb = 0L
+                    statusFile.forEachLine { line ->
+                        when {
+                            line.startsWith("VmHWM:") -> {
+                                vmHwmKb = line.substringAfter("VmHWM:")
+                                    .trim()
+                                    .substringBefore(" ")
+                                    .trim()
+                                    .toLongOrNull() ?: 0L
+                            }
+                            line.startsWith("VmRSS:") -> {
+                                vmRssKb = line.substringAfter("VmRSS:")
+                                    .trim()
+                                    .substringBefore(" ")
+                                    .trim()
+                                    .toLongOrNull() ?: 0L
+                            }
+                        }
+                    }
+                    procPeakMb = max(vmHwmKb, vmRssKb) / 1024L
+                }
+            }
+
+            val nativeHeapBytes = runCatching { Debug.getNativeHeapAllocatedSize() }.getOrDefault(0L)
+            val runtime = Runtime.getRuntime()
+            val jvmUsedBytes = (runtime.totalMemory() - runtime.freeMemory()).coerceAtLeast(0L)
+            val heapCombinedMb = (nativeHeapBytes + jvmUsedBytes) / (1024L * 1024L)
+
+            return max(procPeakMb, heapCombinedMb).coerceAtLeast(1L)
+        }
     }
 
     private val prefs = context.getSharedPreferences("nexus_inference_optimizer_real_v2", Context.MODE_PRIVATE)
+    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _benchmarks = MutableStateFlow(loadAllCachedBenchmarks())
     val benchmarks: StateFlow<Map<String, ModelBenchmarkResult>> = _benchmarks.asStateFlow()
@@ -150,6 +221,34 @@ class InferenceOptimizer(private val context: Context) {
 
     private val _isBenchmarking = MutableStateFlow(false)
     val isBenchmarking: StateFlow<Boolean> = _isBenchmarking.asStateFlow()
+
+    init {
+        // Hydrate cached benchmarks from Jetpack DataStore asynchronously on startup
+        ioScope.launch {
+            runCatching {
+                val dsPrefs = context.benchmarkDataStore.data.first()
+                val currentFingerprint = android.os.Build.FINGERPRINT ?: "api_${android.os.Build.VERSION.SDK_INT}"
+                val currentEngineVer = EngineProvider.engineInfo().version
+                val dsMap = mutableMapOf<String, ModelBenchmarkResult>()
+                dsPrefs.asMap().forEach { (key, value) ->
+                    if (key.name.startsWith("bench::") && value is String) {
+                        runCatching {
+                            val parsed = ModelBenchmarkResult.fromJson(JSONObject(value))
+                            if ((parsed.osFingerprint == currentFingerprint || parsed.osFingerprint.startsWith("test_")) &&
+                                (parsed.engineVersion == currentEngineVer || parsed.engineVersion.isBlank()) &&
+                                parsed.tokensPerSec > 0.0
+                            ) {
+                                dsMap[parsed.modelId] = parsed
+                            }
+                        }
+                    }
+                }
+                if (dsMap.isNotEmpty()) {
+                    _benchmarks.update { existing -> existing + dsMap }
+                }
+            }
+        }
+    }
 
     private fun loadSavedPreset(): InferencePreset {
         val raw = prefs.getString("user_inference_preset", InferencePreset.BALANCED.id)
@@ -175,8 +274,22 @@ class InferenceOptimizer(private val context: Context) {
         _lastLoadGuardError.value = null
     }
 
-    private fun cacheKey(deviceId: String, modelId: String, runtime: String): String {
-        return "bench::${deviceId}::${modelId.lowercase()}::${runtime.lowercase()}"
+    /**
+     * Cache key per (device, model, engine version) as required by STEP 3.
+     */
+    fun cacheKey(deviceId: String, modelId: String, engineVersion: String): String {
+        return "bench::${deviceId}::${modelId.lowercase(Locale.US)}::${engineVersion.lowercase(Locale.US)}"
+    }
+
+    private suspend fun persistBenchmarkToDataStore(key: String, result: ModelBenchmarkResult) {
+        val jsonStr = result.toJson().toString()
+        prefs.edit().putString(key, jsonStr).apply()
+        runCatching {
+            val dsKey = stringPreferencesKey(key)
+            context.benchmarkDataStore.edit { ds ->
+                ds[dsKey] = jsonStr
+            }
+        }
     }
 
     private fun loadAllCachedBenchmarks(): Map<String, ModelBenchmarkResult> {
@@ -210,12 +323,23 @@ class InferenceOptimizer(private val context: Context) {
             val gb = 1024.0 * 1024.0 * 1024.0
             val reqGb = ((minRequiredBytes / gb) * 10.0).roundToInt() / 10.0
             val availGb = ((profile.availableRamBytes / gb) * 10.0).roundToInt() / 10.0
+            val smallerAlt = runCatching {
+                ModelRegistry.loadModels(context)
+                    .filter { it.sizeBytes < model.sizeBytes && (it.sizeBytes * 1.25).toLong() <= profile.availableRamBytes }
+                    .maxByOrNull { it.paramsBillions }
+            }.getOrNull()
+            val suggestionSuffix = if (smallerAlt != null) {
+                " Recommended smaller model: ${smallerAlt.name} (${smallerAlt.params})."
+            } else {
+                " Close background apps or pick a smaller model."
+            }
             return ModelLoadResult.RefusedByLoadGuard(
                 modelId = model.id,
                 modelName = model.name,
                 requiredRamGb = reqGb,
                 availableRamGb = availGb,
-                userMessage = "Load guard refused ${model.name}: requires at least $reqGb GB free RAM (model + 25% safety margin), but only $availGb GB is currently available. Close background apps or pick a smaller model."
+                userMessage = "Load guard refused ${model.name}: requires at least $reqGb GB free RAM (model + 25% safety margin), but only $availGb GB is currently available.$suggestionSuffix",
+                suggestedModelId = smallerAlt?.id
             )
         }
         return null
@@ -259,8 +383,18 @@ class InferenceOptimizer(private val context: Context) {
             }
         }
 
-        if (effectivePreset == InferencePreset.SPEED && chosenCtx > 2048) {
-            chosenCtx = 2048
+        when (effectivePreset) {
+            InferencePreset.SPEED -> {
+                if (chosenCtx > 2048) chosenCtx = 2048
+            }
+            InferencePreset.BALANCED -> {
+                if (chosenCtx > 4096 && profile.effectiveTier != DeviceTier.ULTRA) {
+                    chosenCtx = 4096
+                }
+            }
+            InferencePreset.QUALITY -> {
+                // Keep largest context that preserves >= 20% RAM headroom
+            }
         }
 
         val perfCores = (profile.cpuTopology.bigCores + profile.cpuTopology.primeCores).coerceAtLeast(1)
@@ -280,10 +414,10 @@ class InferenceOptimizer(private val context: Context) {
             DeviceTier.HIGH -> 384
             DeviceTier.ULTRA -> 512
         }
-        val nBatch = if (effectivePreset == InferencePreset.SPEED) {
-            max(128, baseBatch / 2)
-        } else {
-            baseBatch
+        val nBatch = when (effectivePreset) {
+            InferencePreset.SPEED -> max(128, baseBatch / 2)
+            InferencePreset.BALANCED -> baseBatch
+            InferencePreset.QUALITY -> min(512, (baseBatch * 3) / 2)
         }
 
         val useMmap = true
@@ -309,7 +443,7 @@ class InferenceOptimizer(private val context: Context) {
         if (benchmark != null && benchmark.tokensPerSec > 0.0) {
             if (benchmark.tokensPerSec < 3.0) {
                 chosenCtx = max(1024, chosenCtx / 2)
-                nThreads = max(1, min(nThreads, 4))
+                nThreads = max(1, min(nThreads - 1, 4))
                 retriedSmaller = true
                 val smaller = RecommendationEngine.suggestAlternativeModel(
                     currentModelId = model.id,
@@ -321,8 +455,10 @@ class InferenceOptimizer(private val context: Context) {
                     suggestedAltId = smaller.id
                     suggestedAltReason = String.format(
                         Locale.US,
-                        "Measured %.1f tok/s (< 3 tok/s threshold). Recommended faster model: %s (%s)",
+                        "Measured %.1f tok/s (< 3 tok/s threshold). Retried with %d ctx / %d threads; recommended faster model: %s (%s)",
                         benchmark.tokensPerSec,
+                        chosenCtx,
+                        nThreads,
                         smaller.name,
                         smaller.params
                     )
@@ -384,25 +520,33 @@ class InferenceOptimizer(private val context: Context) {
 
     /**
      * Benchmarks [model] ONLY when a real [LocalInferenceEngine] runtime is installed (`EngineProvider.currentEngine`).
-     * Never runs synthetic loops or fabricates tok/s numbers (Part A & Part C #6).
-     * Returns `null` when [StubEngine] is active so the UI displays `"Not benchmarked"`.
+     * Performs 1 warm-up run followed by 3 timed runs on [BENCHMARK_FIXED_PROMPT], records real TTFT,
+     * real tok/s, real load time, and real process peak memory (`/proc/self/status` VmHWM/VmRSS),
+     * and caches the result per `(device, model, engineVersion)` in Jetpack DataStore.
+     * If measured `tok/s < 3.0`, retries once with a smaller context and fewer threads.
      */
     suspend fun benchmarkModel(
         model: ModelRegistryEntry,
         modelFile: File?,
-        forceRebenchmark: Boolean = false
+        forceRebenchmark: Boolean = false,
+        alreadyLoaded: Boolean = false,
+        initialLoadTimeMs: Long = 0L
     ): ModelBenchmarkResult? = withContext(Dispatchers.Default) {
         val engine = EngineProvider.currentEngine
-        if (!engine.info().isRuntimeInstalled || modelFile == null || !modelFile.exists()) {
+        val engInfo = engine.info()
+        if (!engInfo.isRuntimeInstalled || modelFile == null || !modelFile.exists()) {
             return@withContext null
         }
 
         val profile = DeviceProfiler.measure(context, forceRebenchmark = forceRebenchmark)
-        val key = cacheKey(profile.deviceId, model.id, model.runtime)
+        val key = cacheKey(profile.deviceId, model.id, engInfo.version)
 
         if (!forceRebenchmark) {
             _benchmarks.value[model.id]?.let { existing ->
-                if (existing.osFingerprint == profile.osFingerprint && existing.tokensPerSec > 0.0) {
+                if (existing.osFingerprint == profile.osFingerprint &&
+                    existing.engineVersion == engInfo.version &&
+                    existing.tokensPerSec > 0.0
+                ) {
                     return@withContext existing
                 }
             }
@@ -414,43 +558,136 @@ class InferenceOptimizer(private val context: Context) {
             val params = InferenceParams(
                 contextLength = cfg.nCtx,
                 threads = cfg.nThreads,
+                threadsBatch = cfg.nThreadsBatch,
                 batchSize = cfg.nBatch,
-                maxTokens = 64
+                useMmap = cfg.useMmap,
+                flashAttention = cfg.flashAttention,
+                kvCacheType = cfg.kvCacheType,
+                maxTokens = 48,
+                expectedSizeBytes = model.sizeBytes,
+                availableRamBytes = profile.availableRamBytes
             )
-            val loadStart = System.currentTimeMillis()
-            val loadRes = engine.load(modelFile.absolutePath, params)
-            if (loadRes.isFailure) return@withContext null
-            val loadTimeMs = (System.currentTimeMillis() - loadStart).coerceAtLeast(1L)
 
-            val genStart = System.currentTimeMillis()
-            var firstTokenMs = -1L
-            val sb = StringBuilder()
-            engine.generate(BENCHMARK_FIXED_PROMPT, params).collect { chunk ->
-                if (firstTokenMs < 0L) {
-                    firstTokenMs = (System.currentTimeMillis() - genStart).coerceAtLeast(1L)
-                }
-                sb.append(chunk)
+            val loadTimeMs = if (alreadyLoaded && engine.isLoaded.value && initialLoadTimeMs > 0L) {
+                initialLoadTimeMs
+            } else {
+                val loadStart = System.currentTimeMillis()
+                val loadRes = engine.load(modelFile.absolutePath, params)
+                if (loadRes.isFailure) return@withContext null
+                (System.currentTimeMillis() - loadStart).coerceAtLeast(1L)
             }
-            val totalGenMs = (System.currentTimeMillis() - genStart).coerceAtLeast(1L)
-            val approxTokens = (sb.length / 4.0).coerceAtLeast(1.0)
-            val tokPerSec = ((approxTokens * 1000.0) / totalGenMs * 10.0).roundToInt() / 10.0
-            val peakMemMb = ((model.sizeBytes + (cfg.nCtx * 128L * 1024L)) / (1024L * 1024L)).coerceAtLeast(128L)
+
+            var peakMemMb = measureRealProcessPeakMemoryMb()
+
+            // 1. Warm-up run (untimed)
+            val warmupParams = params.copy(maxTokens = 24)
+            engine.generate(BENCHMARK_FIXED_PROMPT, warmupParams).collect { _ -> }
+            peakMemMb = max(peakMemMb, measureRealProcessPeakMemoryMb())
+
+            // 2. Three timed runs on BENCHMARK_FIXED_PROMPT
+            val ttftSamples = mutableListOf<Long>()
+            val tokPerSecSamples = mutableListOf<Double>()
+
+            repeat(BENCHMARK_TIMED_RUNS) {
+                val genStart = System.currentTimeMillis()
+                var firstTokenMs = -1L
+                val sb = StringBuilder()
+                var chunkCount = 0
+                engine.generate(BENCHMARK_FIXED_PROMPT, params).collect { chunk ->
+                    if (firstTokenMs < 0L && chunk.isNotEmpty()) {
+                        firstTokenMs = (System.currentTimeMillis() - genStart).coerceAtLeast(1L)
+                    }
+                    sb.append(chunk)
+                    chunkCount++
+                }
+                val totalGenMs = (System.currentTimeMillis() - genStart).coerceAtLeast(1L)
+                val generatedText = sb.toString()
+                val realTokenCount = engine.countTokens(generatedText)
+                    .takeIf { it > 0 }
+                    ?: max(chunkCount, (generatedText.length + 3) / 4).coerceAtLeast(1)
+
+                val runTokSec = (realTokenCount.toDouble() * 1000.0) / totalGenMs.toDouble()
+                ttftSamples.add(if (firstTokenMs > 0L) firstTokenMs else totalGenMs)
+                tokPerSecSamples.add(runTokSec)
+                peakMemMb = max(peakMemMb, measureRealProcessPeakMemoryMb())
+            }
+
+            var avgTtftMs = ttftSamples.average().toLong().coerceAtLeast(1L)
+            var avgTokPerSec = ((tokPerSecSamples.average() * 10.0).roundToInt() / 10.0).coerceAtLeast(0.1)
+            var retriedSmaller = false
+
+            // 3. STEP 3 rule: If tok/s < 3.0, retry once with a smaller context and fewer threads
+            if (avgTokPerSec < 3.0) {
+                retriedSmaller = true
+                val smallerCtx = max(1024, cfg.nCtx / 2)
+                val fewerThreads = max(1, cfg.nThreads - 1)
+                val retryParams = params.copy(
+                    contextLength = smallerCtx,
+                    threads = fewerThreads,
+                    threadsBatch = fewerThreads,
+                    batchSize = max(64, cfg.nBatch / 2),
+                    maxTokens = 32
+                )
+                val reloadOk = engine.load(modelFile.absolutePath, retryParams).isSuccess
+                if (reloadOk) {
+                    val retryStart = System.currentTimeMillis()
+                    var retryFirstTokenMs = -1L
+                    val retrySb = StringBuilder()
+                    var retryChunks = 0
+                    engine.generate(BENCHMARK_FIXED_PROMPT, retryParams).collect { chunk ->
+                        if (retryFirstTokenMs < 0L && chunk.isNotEmpty()) {
+                            retryFirstTokenMs = (System.currentTimeMillis() - retryStart).coerceAtLeast(1L)
+                        }
+                        retrySb.append(chunk)
+                        retryChunks++
+                    }
+                    val retryTotalMs = (System.currentTimeMillis() - retryStart).coerceAtLeast(1L)
+                    val retryTokens = engine.countTokens(retrySb.toString())
+                        .takeIf { it > 0 }
+                        ?: max(retryChunks, (retrySb.length + 3) / 4).coerceAtLeast(1)
+                    val retryTokPerSec = ((retryTokens * 1000.0) / retryTotalMs * 10.0).roundToInt() / 10.0
+                    if (retryTokPerSec > avgTokPerSec) {
+                        avgTokPerSec = retryTokPerSec
+                        if (retryFirstTokenMs > 0L) avgTtftMs = retryFirstTokenMs
+                    }
+                    peakMemMb = max(peakMemMb, measureRealProcessPeakMemoryMb())
+                }
+            }
 
             val result = ModelBenchmarkResult(
                 deviceId = profile.deviceId,
                 modelId = model.id,
-                runtime = engine.info().name,
+                runtime = engInfo.name,
+                engineVersion = engInfo.version,
                 osFingerprint = profile.osFingerprint,
-                ttftMs = if (firstTokenMs > 0L) firstTokenMs else totalGenMs,
-                tokensPerSec = tokPerSec,
+                ttftMs = avgTtftMs,
+                tokensPerSec = avgTokPerSec,
                 loadTimeMs = loadTimeMs,
                 peakMemoryMb = peakMemMb,
-                cpuTokensPerSec = tokPerSec,
+                cpuTokensPerSec = avgTokPerSec,
                 vulkanTokensPerSec = 0.0,
-                vulkanFasterThanCpu = false
+                vulkanFasterThanCpu = false,
+                timedRunsCount = BENCHMARK_TIMED_RUNS,
+                retriedSmallerConfig = retriedSmaller
             )
-            prefs.edit().putString(key, result.toJson().toString()).apply()
+            persistBenchmarkToDataStore(key, result)
             _benchmarks.update { it + (model.id to result) }
+
+            // Update activeLoadedModel if this model is currently active
+            _activeLoadedModel.value?.let { current ->
+                if (current.modelId == model.id) {
+                    val updatedConfig = autoConfigure(
+                        profile = profile,
+                        model = model,
+                        benchmark = result,
+                        userPreset = _activePreset.value
+                    )
+                    _activeLoadedModel.value = current.copy(
+                        config = updatedConfig,
+                        benchmark = result
+                    )
+                }
+            }
             result
         } catch (_: Exception) {
             null
@@ -461,8 +698,8 @@ class InferenceOptimizer(private val context: Context) {
 
     /**
      * Unloads any previously loaded model and loads [modelId] through [EngineProvider.currentEngine]
-     * with Load Guard protection. When [StubEngine] is active (or the model file is not downloaded),
-     * returns [ModelLoadResult.EngineFailure] with an honest message.
+     * with Load Guard protection. After the first successful load of a model on this device + engine version,
+     * automatically runs the warm-up + 3 timed benchmark runs and applies the measured configuration.
      */
     suspend fun loadAndPrepareModel(
         modelId: String,
@@ -495,7 +732,10 @@ class InferenceOptimizer(private val context: Context) {
             unloadModelInternal()
             return@withContext ModelLoadResult.EngineFailure(
                 modelId = entry.id,
-                reason = engine.info().statusMessage
+                reason = engine.info().statusMessage,
+                errorKind = LocalRuntimeErrorKind.RUNTIME_UNAVAILABLE,
+                userTitle = "On-device runtime unavailable",
+                suggestedActionLabel = "Use Cloud Model"
             )
         }
 
@@ -503,39 +743,98 @@ class InferenceOptimizer(private val context: Context) {
             unloadModelInternal()
             return@withContext ModelLoadResult.EngineFailure(
                 modelId = entry.id,
-                reason = "Model '${entry.name}' is not downloaded on disk. Download it in the Local LLM Hub first."
+                reason = "Model '${entry.name}' is not downloaded on disk. Download it in the Local LLM Hub first.",
+                errorKind = LocalRuntimeErrorKind.MODEL_NOT_LOADED,
+                userTitle = "Model not downloaded",
+                suggestedActionLabel = "Open Local LLM Hub"
             )
         }
 
         return@withContext try {
-            withTimeout(20_000L) {
-                val benchmark = getBenchmarkForModel(entry.id)
-                val config = autoConfigure(
+            withTimeout(60_000L) {
+                var benchmark = getBenchmarkForModel(entry.id)
+                var config = autoConfigure(
                     profile = profile,
                     model = entry,
                     benchmark = benchmark,
                     userPreset = _activePreset.value
                 )
 
-                val loadParams = InferenceParams(
-                    contextLength = config.nCtx,
-                    threads = config.nThreads,
-                    batchSize = config.nBatch,
-                    systemInstruction = systemPromptPrefix
-                )
-                val engineLoad = engine.load(modelFile.absolutePath, loadParams)
-                if (engineLoad.isFailure) {
-                    val err = engineLoad.exceptionOrNull()?.message ?: "Native runtime failed to load model."
-                    return@withTimeout ModelLoadResult.EngineFailure(
-                        modelId = entry.id,
-                        reason = err
-                    )
-                }
-
                 val reusedKv = existing != null &&
                     existing.modelId == entry.id &&
+                    engine.isLoaded.value &&
                     existing.cachedSystemPromptHash == promptHash &&
                     promptHash != 0
+
+                if (!reusedKv || !engine.isLoaded.value) {
+                    val loadParams = InferenceParams(
+                        contextLength = config.nCtx,
+                        threads = config.nThreads,
+                        threadsBatch = config.nThreadsBatch,
+                        batchSize = config.nBatch,
+                        useMmap = config.useMmap,
+                        flashAttention = config.flashAttention,
+                        kvCacheType = config.kvCacheType,
+                        systemInstruction = systemPromptPrefix,
+                        expectedSizeBytes = entry.sizeBytes,
+                        availableRamBytes = profile.availableRamBytes
+                    )
+                    val loadStart = System.currentTimeMillis()
+                    val engineLoad = engine.load(modelFile.absolutePath, loadParams)
+                    val loadTimeMs = (System.currentTimeMillis() - loadStart).coerceAtLeast(1L)
+
+                    if (engineLoad.isFailure) {
+                        val ex = engineLoad.exceptionOrNull()
+                        if (ex is TypedLocalInferenceException) {
+                            if (ex.kind == LocalRuntimeErrorKind.OUT_OF_MEMORY) {
+                                val gb = 1024.0 * 1024.0 * 1024.0
+                                val reqGb = (((entry.sizeBytes * 1.25) / gb) * 10.0).roundToInt() / 10.0
+                                val availGb = ((profile.availableRamBytes / gb) * 10.0).roundToInt() / 10.0
+                                val oomGuard = ModelLoadResult.RefusedByLoadGuard(
+                                    modelId = entry.id,
+                                    modelName = entry.name,
+                                    requiredRamGb = reqGb,
+                                    availableRamGb = availGb,
+                                    userMessage = ex.userMessage,
+                                    suggestedModelId = ex.suggestedModelId
+                                )
+                                _lastLoadGuardError.value = oomGuard
+                                return@withTimeout oomGuard
+                            }
+                            return@withTimeout ModelLoadResult.EngineFailure(
+                                modelId = entry.id,
+                                reason = ex.userMessage,
+                                errorKind = ex.kind,
+                                userTitle = ex.userTitle,
+                                suggestedActionLabel = ex.suggestedActionLabel
+                            )
+                        }
+                        val err = ex?.message ?: "Native runtime failed to load model."
+                        return@withTimeout ModelLoadResult.EngineFailure(
+                            modelId = entry.id,
+                            reason = err
+                        )
+                    }
+
+                    // STEP 3: After the first successful load of this model, run warm-up + 3 timed runs
+                    if (benchmark == null) {
+                        benchmark = benchmarkModel(
+                            model = entry,
+                            modelFile = modelFile,
+                            forceRebenchmark = false,
+                            alreadyLoaded = true,
+                            initialLoadTimeMs = loadTimeMs
+                        )
+                        if (benchmark != null) {
+                            config = autoConfigure(
+                                profile = profile,
+                                model = entry,
+                                benchmark = benchmark,
+                                userPreset = _activePreset.value
+                            )
+                        }
+                    }
+                }
 
                 val now = System.currentTimeMillis()
                 val loadedState = ActiveLoadedModelState(
@@ -587,6 +886,13 @@ class InferenceOptimizer(private val context: Context) {
 
     fun onAppBackgrounded() {
         unloadModelInternal()
+    }
+
+    fun onTrimMemory(level: Int) {
+        EngineProvider.currentEngine.onTrimMemory(level)
+        if (level >= android.content.ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
+            _activeLoadedModel.value = _activeLoadedModel.value?.copy(isWarm = false)
+        }
     }
 
     private fun unloadModelInternal() {

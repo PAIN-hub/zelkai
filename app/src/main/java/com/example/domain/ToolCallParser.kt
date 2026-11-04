@@ -571,7 +571,7 @@ plain-text ::= ([^`] | "`" [^`] | "``" [^`])+
         defaultTimeoutSec: Long = 10L,
         allowMultiLineIfApproved: Boolean = false
     ): ToolCallParseResult {
-        val trimmedText = rawText.trim()
+        val trimmedText = ThinkingTagParser.stripThinkingForHistoryAndTools(rawText).trim()
         if (trimmedText.isEmpty()) {
             return ToolCallParseResult.NoToolCall
         }

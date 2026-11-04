@@ -7,24 +7,38 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
 
 /**
- * Honest default implementation of [LocalInferenceEngine] when no native JNI llama.cpp runtime is bundled.
+ * Fallback implementation of [LocalInferenceEngine] when the native JNI llama.cpp runtime
+ * cannot be loaded (e.g. non-ARM64 ABI, x86/x86_64 emulator, or missing `.so`).
  * Never returns generated filler text or synthetic speeds.
  */
-class StubEngine : LocalInferenceEngine {
+class StubEngine(
+    private val customStatusMessage: String = "Runtime not installed: models can be downloaded but not run yet",
+    private val detectedAbi: String = "unknown"
+) : LocalInferenceEngine {
     private val _isLoaded = MutableStateFlow(false)
     override val isLoaded: StateFlow<Boolean> = _isLoaded.asStateFlow()
 
     override suspend fun load(path: String, params: InferenceParams): Result<Unit> {
         _isLoaded.value = false
-        return Result.failure(IllegalStateException("Native runtime not installed"))
+        return Result.failure(
+            TypedLocalInferenceException(
+                kind = LocalRuntimeErrorKind.RUNTIME_UNAVAILABLE,
+                userTitle = "On-device runtime unavailable",
+                userMessage = customStatusMessage
+            )
+        )
     }
 
     override fun generate(prompt: String, params: InferenceParams): Flow<String> = flow {
-        throw IllegalStateException("Native runtime not installed")
+        throw TypedLocalInferenceException(
+            kind = LocalRuntimeErrorKind.RUNTIME_UNAVAILABLE,
+            userTitle = "On-device runtime unavailable",
+            userMessage = customStatusMessage
+        )
     }
 
     override fun stop() {
-        // Nothing active to stop when native runtime is not installed.
+        // Nothing active to stop when native runtime is not active.
     }
 
     override fun unload() {
@@ -35,6 +49,10 @@ class StubEngine : LocalInferenceEngine {
         name = "StubEngine",
         version = "1.0",
         isRuntimeInstalled = false,
-        statusMessage = "Runtime not installed: models can be downloaded but not run yet"
+        statusMessage = customStatusMessage,
+        llamaCppTag = LlamaEngine.LLAMA_CPP_TAG,
+        backendInfo = "Stub (Unavailable)",
+        cpuFeatures = "None",
+        abi = detectedAbi
     )
 }

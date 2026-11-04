@@ -25,3 +25,5 @@ dependencyResolutionManagement {
 rootProject.name = "Nexus Agent v5"
 
 include(":app")
+include(":llama")
+project(":llama").projectDir = file("third_party/llama.cpp/examples/llama.android/lib")

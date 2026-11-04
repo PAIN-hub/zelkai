@@ -32,6 +32,9 @@ import com.example.domain.LocalModelDownloadState
 import com.example.domain.LocalModelInferenceException
 import com.example.domain.LocalModelLoadGuardException
 import com.example.domain.LocalModelNotLoadedException
+import com.example.domain.LocalRuntimeErrorKind
+import com.example.domain.TypedLocalInferenceException
+import com.example.domain.ThinkingTagParser
 import com.example.domain.LocalShellBridge
 import com.example.domain.MissingApiKeyException
 import com.example.domain.ModelBenchmarkResult
@@ -666,6 +669,18 @@ class NexusViewModel(
 
     fun deleteLocalModel(modelId: String) {
         localLlmManager.deleteDownloadedModel(modelId)
+    }
+
+    fun deleteAndRedownloadCorruptLocalModel(modelId: String) {
+        val targetId = modelId.ifBlank { selectedModelId.value }
+        localLlmManager.deleteDownloadedModel(targetId)
+        val spec = LocalLlmManager.findSpec(targetId)
+        if (spec != null) {
+            startLocalModelDownload(spec, confirmedMobileData = false)
+            _uiBannerMessage.value = "Deleted corrupt ${spec.name} file and started fresh download."
+        } else {
+            _uiBannerMessage.value = "Deleted corrupt model file."
+        }
     }
 
     fun activateLocalModel(spec: LocalLlmSpec) {
@@ -3525,6 +3540,31 @@ class NexusViewModel(
                     providerDisplayName = e.providerDisplayName,
                     message = e.message ?: "Missing API key for ${e.providerDisplayName}."
                 )
+            } catch (e: TypedLocalInferenceException) {
+                logPipelineStage("DROP_AT_TYPED_LOCAL_ERROR", "kind=${e.kind}, model=${e.modelId}, msg=${e.userMessage}")
+                _streamingText.value = null
+                val mappedNoticeKind = when (e.kind) {
+                    LocalRuntimeErrorKind.OUT_OF_MEMORY -> "local_oom"
+                    LocalRuntimeErrorKind.CORRUPT_FILE -> "local_corrupt_file"
+                    LocalRuntimeErrorKind.UNSUPPORTED_MODEL -> "local_unsupported_model"
+                    LocalRuntimeErrorKind.GENERATION_FAILED -> "local_generation_failed"
+                    LocalRuntimeErrorKind.MODEL_NOT_LOADED,
+                    LocalRuntimeErrorKind.RUNTIME_UNAVAILABLE -> "error"
+                }
+                val formattedText = if (e.userTitle.isNotBlank() && !e.userMessage.startsWith(e.userTitle, ignoreCase = true)) {
+                    "${e.userTitle}: ${e.userMessage}"
+                } else {
+                    e.userMessage
+                }
+                appendEntryOrLocal(
+                    sessionId = sessionId,
+                    type = "notice",
+                    sequence = nextSequence(),
+                    text = formattedText,
+                    command = e.modelId.ifBlank { activeMod },
+                    noticeKind = mappedNoticeKind,
+                    cwd = shellBridge.currentCwd
+                )
             } catch (e: LocalModelNotLoadedException) {
                 logPipelineStage("DROP_AT_MODEL_NOT_LOADED", e.message)
                 _streamingText.value = null
@@ -3533,6 +3573,7 @@ class NexusViewModel(
                     type = "notice",
                     sequence = nextSequence(),
                     text = e.message,
+                    command = e.modelId,
                     noticeKind = "error",
                     cwd = shellBridge.currentCwd
                 )
@@ -3544,7 +3585,8 @@ class NexusViewModel(
                     type = "notice",
                     sequence = nextSequence(),
                     text = e.message,
-                    noticeKind = "error",
+                    command = e.modelId,
+                    noticeKind = "local_generation_failed",
                     cwd = shellBridge.currentCwd
                 )
             } catch (e: ProviderApiException) {
@@ -3583,7 +3625,8 @@ class NexusViewModel(
                     type = "notice",
                     sequence = nextSequence(),
                     text = e.guardFailure.userMessage,
-                    noticeKind = "error",
+                    command = e.guardFailure.modelId,
+                    noticeKind = "local_oom",
                     cwd = shellBridge.currentCwd
                 )
             } catch (e: Exception) {
@@ -3609,6 +3652,7 @@ class NexusViewModel(
 
     fun stopRunningAgent() {
         userRequestedStop = true
+        localLlmManager.stopLocalGeneration()
         customExecutionBackend?.cancel()
         termuxBackend?.cancel()
         androidShellBackend.cancel()
@@ -3848,7 +3892,13 @@ class NexusViewModel(
 
                 is ToolCallParseResult.Success -> {
                     val toolCall: ToolCall = parseResult.toolCall
-                    val assistantText = parseResult.cleanedAssistantText
+                    val parsedThinking = ThinkingTagParser.parse(fullRawText)
+                    val thinkingBlockPrefix = if (parsedThinking.thinkingText.isNotEmpty()) {
+                        "<think>\n${parsedThinking.thinkingText}\n</think>\n\n"
+                    } else {
+                        ""
+                    }
+                    val assistantText = (thinkingBlockPrefix + parseResult.cleanedAssistantText).trim()
                     logPipelineStage(
                         stage = "2_TOOL_CALL_PARSER",
                         detail = "Parsed command='${toolCall.command}', source=${toolCall.source}, risk=${toolCall.riskLevel}"
@@ -3869,7 +3919,7 @@ class NexusViewModel(
                                 userId = currentUserId,
                                 sessionId = sessionId,
                                 type = "agent",
-                                text = assistantText,
+                                text = parseResult.cleanedAssistantText,
                                 cwd = _currentWorkingDir.value,
                                 sequence = agentSeq
                             )

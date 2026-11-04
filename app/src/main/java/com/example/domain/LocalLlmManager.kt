@@ -304,8 +304,22 @@ class LocalLlmManager(private val context: Context) {
         singletonInstance = this
         ModelDownloadService.managerRef = this
         ModelRegistry.loadModels(context)
+        if (EngineProvider.currentEngine is StubEngine) {
+            EngineProvider.initialize(context)
+        }
+        _engineInfo.value = EngineProvider.engineInfo()
         restorePersistedCheckpoints()
         registerConnectivityAutoResume()
+        scope.launch {
+            EngineProvider.engineFlow.collect { eng ->
+                _engineInfo.value = eng.info()
+            }
+        }
+        scope.launch {
+            inferenceOptimizer.benchmarks.collect {
+                refreshDeviceProfileAndRecommendations(forceRebenchmark = false)
+            }
+        }
         scope.launch {
             refreshDeviceProfileAndRecommendations(forceRebenchmark = false)
         }
@@ -503,6 +517,14 @@ class LocalLlmManager(private val context: Context) {
 
     fun onAppBackgrounded() {
         inferenceOptimizer.onAppBackgrounded()
+    }
+
+    fun onTrimMemory(level: Int) {
+        inferenceOptimizer.onTrimMemory(level)
+    }
+
+    fun stopLocalGeneration() {
+        runCatching { EngineProvider.currentEngine.stop() }
     }
 
     private fun checkCurrentNetworkOnline(): Boolean {
@@ -1086,39 +1108,58 @@ class LocalLlmManager(private val context: Context) {
         )
         when (loadRes) {
             is ModelLoadResult.RefusedByLoadGuard -> throw LocalModelLoadGuardException(loadRes)
-            is ModelLoadResult.EngineFailure -> throw LocalModelNotLoadedException(
-                modelId = spec.id,
-                message = "Model not loaded: ${loadRes.reason}"
-            )
+            is ModelLoadResult.EngineFailure -> {
+                if (loadRes.errorKind == LocalRuntimeErrorKind.CORRUPT_FILE ||
+                    loadRes.errorKind == LocalRuntimeErrorKind.UNSUPPORTED_MODEL ||
+                    loadRes.errorKind == LocalRuntimeErrorKind.OUT_OF_MEMORY
+                ) {
+                    throw TypedLocalInferenceException(
+                        kind = loadRes.errorKind,
+                        modelId = spec.id,
+                        userTitle = loadRes.userTitle,
+                        userMessage = loadRes.reason,
+                        suggestedActionLabel = loadRes.suggestedActionLabel
+                    )
+                }
+                throw LocalModelNotLoadedException(
+                    modelId = spec.id,
+                    message = "Model not loaded: ${loadRes.reason}"
+                )
+            }
             is ModelLoadResult.Loaded -> inferenceOptimizer.touchActiveModel(systemPromptPrefix)
         }
 
         val loadedInfo = loadRes as ModelLoadResult.Loaded
         val cfg = loadedInfo.config
 
-        val fullPrompt = buildString {
-            if (systemPromptPrefix.isNotBlank()) {
-                append(systemPromptPrefix.trim()).append("\n\n")
+        val userTurnPrompt = buildString {
+            append(userPrompt.trim())
+            if (recentCommandOutputs.isNotEmpty()) {
+                append("\n\n")
+                for ((cmd, out) in recentCommandOutputs) {
+                    append("Previous command executed:\n```sh-exec\n").append(cmd).append("\n```\n")
+                    append(out.trim()).append("\n")
+                }
             }
-            append("User: ").append(userPrompt.trim()).append("\n")
-            for ((cmd, out) in recentCommandOutputs) {
-                append("Assistant:\n```sh-exec\n").append(cmd).append("\n```\n")
-                append("User:\n").append(out).append("\n")
-            }
-            append("Assistant:\n")
         }
 
         val params = InferenceParams(
             contextLength = cfg.nCtx,
             threads = cfg.nThreads,
+            threadsBatch = cfg.nThreadsBatch,
             batchSize = cfg.nBatch,
+            useMmap = cfg.useMmap,
+            flashAttention = cfg.flashAttention,
+            kvCacheType = cfg.kvCacheType,
+            temperature = if (cfg.presetUsed == InferencePreset.SPEED) 0.2f else 0.4f,
             systemInstruction = systemPromptPrefix,
-            stopSequences = ToolCallParser.LOCAL_STOP_SEQUENCES
+            stopSequences = ToolCallParser.LOCAL_STOP_SEQUENCES,
+            expectedSizeBytes = spec.sizeBytes
         )
 
         val buffer = StringBuilder()
         try {
-            engine.generate(fullPrompt, params).collect { chunk ->
+            engine.generate(userTurnPrompt, params).collect { chunk ->
                 currentCoroutineContext().ensureActive()
                 buffer.append(chunk)
                 emit(chunk)
@@ -1126,6 +1167,8 @@ class LocalLlmManager(private val context: Context) {
         } catch (ce: CancellationException) {
             engine.stop()
             throw ce
+        } catch (te: TypedLocalInferenceException) {
+            throw te
         } catch (e: Throwable) {
             throw LocalModelInferenceException(
                 modelId = spec.id,

@@ -173,7 +173,7 @@ fun LocalLlmHubDialog(
                     }
                 }
 
-                // StubEngine / Runtime Status Banner (Part C #4)
+                // Runtime Status & Engine Info Banner (STEP 4)
                 if (!engineInfo.isRuntimeInstalled) {
                     Surface(
                         shape = RoundedCornerShape(12.dp),
@@ -199,6 +199,70 @@ fun LocalLlmHubDialog(
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
                                 color = MaterialTheme.colorScheme.onSurface
                             )
+                        }
+                    }
+                } else {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("local_runtime_installed_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Verified,
+                                    contentDescription = "Runtime active",
+                                    tint = NexusOk,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Column {
+                                    Text(
+                                        text = "Engine: ${engineInfo.name} (${engineInfo.llamaCppTag}) · ABI: ${engineInfo.abi}",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            fontWeight = FontWeight.SemiBold
+                                        ),
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                    val featuresText = engineInfo.cpuFeatures.ifBlank { engineInfo.backendInfo }
+                                    Text(
+                                        text = "Backend: ${engineInfo.backendInfo} · Features: $featuresText",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                            }
+                            if (deviceProfile != null && deviceProfile.thermalStatusCode >= 2) {
+                                Surface(
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = NexusWarn.copy(alpha = 0.16f),
+                                    border = BorderStroke(1.dp, NexusWarn.copy(alpha = 0.5f)),
+                                    modifier = Modifier.testTag("hub_thermal_throttle_chip")
+                                ) {
+                                    Text(
+                                        text = "THERMAL ${deviceProfile.thermalStatusLabel.uppercase(Locale.US)} (-1T)",
+                                        style = MaterialTheme.typography.labelSmall.copy(
+                                            fontFamily = JetBrainsMonoFontFamily,
+                                            fontWeight = FontWeight.SemiBold
+                                        ),
+                                        color = NexusWarn,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -637,14 +701,29 @@ private fun DeviceHardwareBanner(
             ) {
                 if (activeLoadedModel != null) {
                     val tokSec = activeLoadedModel.benchmark?.tokensPerSec ?: 0.0
-                    Text(
-                        text = "Loaded: ${activeLoadedModel.modelName} · ctx=${activeLoadedModel.config.nCtx} · threads=${activeLoadedModel.config.nThreads} · ${String.format(Locale.US, "%.1f", tokSec)} tok/s",
-                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
-                        color = NexusOk,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    val perfLabel = if (tokSec > 0.0) {
+                        "${String.format(Locale.US, "%.1f", tokSec)} tok/s · TTFT ${activeLoadedModel.benchmark?.ttftMs ?: 0L}ms"
+                    } else {
+                        "Not benchmarked"
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Loaded: ${activeLoadedModel.modelName} · ctx=${activeLoadedModel.config.nCtx} · threads=${activeLoadedModel.config.nThreads} · $perfLabel",
+                            style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                            color = NexusOk,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        activeLoadedModel.config.suggestedAlternativeReason?.let { reason ->
+                            Text(
+                                text = reason,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = NexusWarn,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
                     Spacer(modifier = Modifier.width(8.dp))
                     OutlinedButton(
                         onClick = onUnloadModel,
@@ -1106,9 +1185,10 @@ private fun LocalLlmCatalogCard(
                     modifier = Modifier.size(13.dp)
                 )
                 val speedLabel = when {
-                    benchmark != null -> "${String.format(Locale.US, "%.1f", benchmark.tokensPerSec)} tok/s · TTFT ${benchmark.ttftMs}ms"
+                    benchmark != null && benchmark.tokensPerSec > 0.0 ->
+                        "${String.format(Locale.US, "%.1f", benchmark.tokensPerSec)} tok/s · TTFT ${benchmark.ttftMs}ms"
                     recommendation != null -> recommendation.speedDisplayLabel
-                    else -> "${spec.contextDefault} ctx"
+                    else -> "Not benchmarked"
                 }
                 Text(
                     text = speedLabel,
@@ -1257,10 +1337,10 @@ private fun LocalLlmCatalogCard(
                             modifier = Modifier.size(15.dp)
                         )
                         Text(
-                            text = if (benchmark != null) {
-                                "Optimized: ${String.format(Locale.US, "%.1f", benchmark.tokensPerSec)} tok/s · Peak ${benchmark.peakMemoryMb} MB"
+                            text = if (benchmark != null && benchmark.tokensPerSec > 0.0) {
+                                "Measured: ${String.format(Locale.US, "%.1f", benchmark.tokensPerSec)} tok/s · TTFT ${benchmark.ttftMs}ms · Peak ${benchmark.peakMemoryMb} MB"
                             } else {
-                                "Installed · Ready for offline GGUF inference"
+                                "Installed · Not benchmarked"
                             },
                             style = MaterialTheme.typography.labelSmall,
                             color = NexusOk,
@@ -1272,17 +1352,24 @@ private fun LocalLlmCatalogCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
-                        IconButton(
+                        OutlinedButton(
                             onClick = onReRunBenchmark,
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                             modifier = Modifier
-                                .size(32.dp)
+                                .height(30.dp)
                                 .testTag("rerun_benchmark_${spec.id}")
                         ) {
                             Icon(
                                 imageVector = Icons.Default.Refresh,
                                 contentDescription = "Re-run benchmark",
                                 tint = NexusAccent,
-                                modifier = Modifier.size(17.dp)
+                                modifier = Modifier.size(13.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Re-run benchmark",
+                                style = MaterialTheme.typography.labelSmall
                             )
                         }
                         IconButton(

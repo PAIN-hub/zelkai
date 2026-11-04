@@ -112,16 +112,16 @@ class MultiPlatformAiEngine(
             currentCwd: String
         ): String {
             return """
-You are Nexus Agent on Android Linux.
+You are Nexus Agent on Android Linux (Termux / toybox environment).
 Real working directory (cwd): $currentCwd
-Android constraints: no sudo, no apt/apt-get, Termux bash or toybox/mksh commands.
-Protocol: To run a shell command in cwd, output ONLY one `sh-exec` block (1 command per block, max 1 per step, no unescaped multi-line chains). For long-running servers (`npm run dev`, `python -m http.server`, `node server.js`, `flask run`), use `start_job <command>`, `job_status <id>`, `job_logs <id> 30`, or `stop_job <id>`. After `[TOOL_EXECUTION_RESULT]`, summarize the result in plain text.
+Constraints: no sudo, no apt/apt-get, Termux bash or toybox/mksh commands.
+Protocol: To run a shell command or create/edit files in cwd, output ONLY one `sh-exec` block (1 command per block, max 1 per step, no unescaped multi-line chains). For long-running servers (`npm run dev`, `python -m http.server`, `node server.js`, `flask run`), use `start_job <command>`, `job_status <id>`, `job_logs <id> 30`, or `stop_job <id>`. After `[TOOL_EXECUTION_RESULT]`, summarize the result in plain text.
 
 Example 1:
-User: create a folder named web
+User: create index.html with a landing page
 Assistant:
 ```sh-exec
-mkdir -p web
+printf '<!doctype html><html><head><title>Landing</title></head><body><h1>Welcome</h1></body></html>\n' > index.html
 ```
 
 Example 2:
@@ -160,24 +160,40 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
 
         fun trimEntriesForLocalBudget(
             entries: List<TranscriptEntry>,
-            tokenBudget: Int = LOCAL_HISTORY_TOKEN_BUDGET
+            tokenBudget: Int = LOCAL_HISTORY_TOKEN_BUDGET,
+            tokenCounter: ((String) -> Int)? = null
         ): List<TranscriptEntry> {
-            val maxChars = (tokenBudget * 4).coerceAtLeast(800)
-            var usedChars = 0
+            val effectiveBudget = tokenBudget.coerceAtLeast(200)
+            val countTokensFn: (String) -> Int = tokenCounter ?: { text ->
+                runCatching { EngineProvider.currentEngine.countTokens(text) }
+                    .getOrDefault((text.length + 3) / 4)
+                    .coerceAtLeast(1)
+            }
+            var usedTokens = 0
             val result = ArrayList<TranscriptEntry>()
 
             for (entry in entries.asReversed()) {
                 val compactEntry = when (entry.type) {
                     "output" -> entry.copy(output = entry.output.take(2000))
-                    "agent" -> entry.copy(text = entry.text.take(600))
+                    "agent" -> {
+                        val stripped = ThinkingTagParser.stripThinkingForHistoryAndTools(entry.text)
+                        entry.copy(text = stripped.take(600))
+                    }
                     "user" -> entry.copy(text = entry.text.take(600))
                     else -> entry
                 }
-                val entryChars = compactEntry.text.length + compactEntry.output.length + compactEntry.command.length + 32
-                if (usedChars + entryChars > maxChars && result.isNotEmpty()) {
+                val combinedText = buildString {
+                    append(compactEntry.text)
+                    append(' ')
+                    append(compactEntry.output)
+                    append(' ')
+                    append(compactEntry.command)
+                }
+                val entryTokens = countTokensFn(combinedText) + 8
+                if (usedTokens + entryTokens > effectiveBudget && result.isNotEmpty()) {
                     break
                 }
-                usedChars += entryChars
+                usedTokens += entryTokens
                 result.add(compactEntry)
             }
             return result.reversed()
@@ -196,7 +212,7 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
                         if (t.isNotEmpty()) rawTurns.add("user" to t)
                     }
                     "agent" -> {
-                        val t = entry.text.trim()
+                        val t = ThinkingTagParser.stripThinkingForHistoryAndTools(entry.text)
                         if (t.isNotEmpty()) {
                             rawTurns.add("model" to t)
                         }

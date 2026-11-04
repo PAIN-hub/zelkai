@@ -15,3 +15,13 @@
 
 # Keep org.json classes
 -keep class org.json.** { *; }
+
+# Keep llama.cpp JNI bridge classes, GGUF metadata reader, and native methods
+-keep class com.arm.aichat.** { *; }
+-keepclassmembers class com.arm.aichat.** {
+    native <methods>;
+    *;
+}
+-keepclasseswithmembernames,includedescriptorclasses class * {
+    native <methods>;
+}

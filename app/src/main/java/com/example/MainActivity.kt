@@ -29,6 +29,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.domain.EngineProvider
+import com.example.domain.LocalLlmManager
 import com.example.domain.NexusToolAndRedactor
 import com.example.ui.auth.AuthScreen
 import com.example.ui.nexus.NexusMainScreen
@@ -57,6 +59,9 @@ class MainActivity : ComponentActivity() {
 
         // STEP 0: Install redacted uncaught exception handler (Part E) so crashes never leak API keys or raw stack traces
         installRedactedUncaughtExceptionHandler()
+
+        // Initialize on-device inference runtime safely (falls back to StubEngine on non-ARM64/emulator)
+        EngineProvider.initialize(applicationContext)
 
         // STEP 1: Mandatory App Check configuration with launch intent before any UI or Firebase calls
         configureAppCheck(this, intent)
@@ -186,6 +191,13 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        runCatching {
+            LocalLlmManager.getInstance(applicationContext).onTrimMemory(level)
         }
     }
 

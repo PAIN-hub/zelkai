@@ -689,12 +689,114 @@ internal fun parseRichMarkdownNodes(markdown: String): List<RichMarkdownNode> {
 }
 
 @Composable
+fun CollapsibleThinkingSection(
+    thinkingText: String,
+    isThinkingInProgress: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val tokens = NexusThemeTokens.colors
+    var expanded by rememberSaveable { mutableStateOf(false) }
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag("thinking_section_card"),
+        shape = RoundedCornerShape(14.dp),
+        color = tokens.surfaceVariant.copy(alpha = 0.65f),
+        border = BorderStroke(1.dp, tokens.outline)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            DisableSelection {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { expanded = !expanded }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .testTag("thinking_section_toggle"),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (isThinkingInProgress) {
+                            StreamingPulseDot()
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = "Reasoning trace",
+                                tint = tokens.onSurfaceVariant,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                        Text(
+                            text = if (isThinkingInProgress) "Thinking…" else "Thinking",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                            color = tokens.onSurface
+                        )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = if (expanded) "Hide" else "Show",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = tokens.aiSecondaryText
+                        )
+                        Icon(
+                            imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                            contentDescription = if (expanded) "Collapse thinking" else "Expand thinking",
+                            tint = tokens.aiSecondaryText,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                }
+            }
+
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(1.dp)
+                            .background(tokens.outline)
+                    )
+                    Text(
+                        text = thinkingText.ifBlank { "Analyzing task…" },
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontSize = 13.sp,
+                            lineHeight = 19.sp
+                        ),
+                        color = tokens.aiSecondaryText,
+                        modifier = Modifier.testTag("thinking_section_content")
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun MarkdownMessageContent(
     markdown: String,
     isStreaming: Boolean = false
 ) {
     val tokens = NexusThemeTokens.colors
-    val nodes = remember(markdown) { parseRichMarkdownNodes(markdown) }
+    val parsedThinking = remember(markdown) {
+        com.example.domain.ThinkingTagParser.parse(markdown)
+    }
+    val nodes = remember(parsedThinking.visibleText) {
+        parseRichMarkdownNodes(parsedThinking.visibleText)
+    }
 
     val contentColumn: @Composable () -> Unit = {
         Column(
@@ -703,6 +805,12 @@ fun MarkdownMessageContent(
                 .testTag("markdown_message_container"),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
+            if (parsedThinking.thinkingText.isNotEmpty() || parsedThinking.isThinkingInProgress) {
+                CollapsibleThinkingSection(
+                    thinkingText = parsedThinking.thinkingText,
+                    isThinkingInProgress = parsedThinking.isThinkingInProgress
+                )
+            }
             nodes.forEachIndexed { idx, node ->
                 val isLastNode = idx == nodes.lastIndex
                 when (node) {
@@ -1316,7 +1424,9 @@ fun TranscriptEntryItem(
     onKeepProjectInSharedStorage: (() -> Unit)? = null,
     onConfirmProjectSlug: ((String, Boolean) -> Unit)? = null,
     onImportMirrorFromShared: (() -> Unit)? = null,
-    onSyncMirrorNow: (() -> Unit)? = null
+    onSyncMirrorNow: (() -> Unit)? = null,
+    onOpenLocalLlmHub: (() -> Unit)? = null,
+    onDeleteAndRedownloadModel: ((String) -> Unit)? = null
 ) {
     val tokens = NexusThemeTokens.colors
     val clipboard = LocalClipboardManager.current
@@ -1908,7 +2018,12 @@ fun TranscriptEntryItem(
 
         "notice" -> {
             val kind = entry.noticeKind.lowercase()
-            val isError = kind == "error" || kind == "model_unavailable" || kind == "working_dir_unreachable"
+            val isLocalOom = kind == "local_oom"
+            val isLocalCorruptFile = kind == "local_corrupt_file"
+            val isLocalUnsupportedModel = kind == "local_unsupported_model"
+            val isLocalGenerationFailed = kind == "local_generation_failed"
+            val isError = kind == "error" || kind == "model_unavailable" || kind == "working_dir_unreachable" ||
+                isLocalOom || isLocalCorruptFile || isLocalUnsupportedModel || isLocalGenerationFailed
             val isPermission = kind == "permission"
             val isStepLimit = kind == "step_limit"
             val isGuestLimit = kind == "guest_limit"
@@ -1929,11 +2044,11 @@ fun TranscriptEntryItem(
             val isFallbackPrompt = kind == "fallback_prompt"
             val isTimeoutBgOffer = kind == "timeout_bg_offer" ||
                 (isError && (entry.text.contains("timed out", ignoreCase = true) || entry.text.contains("timeout", ignoreCase = true)))
-            val showBgRerunButton = (isTimeoutBgOffer || (entry.command.isNotBlank() && com.example.domain.ServerLogAnalyzer.shouldRunAsBackgroundJob(entry.command))) &&
+            val showBgRerunButton = (isTimeoutBgOffer || (entry.command.isNotBlank() && !isLocalOom && !isLocalCorruptFile && !isLocalUnsupportedModel && !isLocalGenerationFailed && com.example.domain.ServerLogAnalyzer.shouldRunAsBackgroundJob(entry.command))) &&
                 onRerunAsBackgroundJob != null && entry.command.isNotBlank()
             val showSetupButton = (isSetupNeeded || isWorkingDirUnreachable) && onOpenEnvironmentSetup != null
             val showFallbackButton = isFallbackPrompt && onFallbackLimitedShell != null
-            val showRetryButton = (isError || isStepLimit || isPermission) && onRetryAction != null
+            val showRetryButton = (isError || isStepLimit || isPermission || isLocalGenerationFailed) && !isLocalCorruptFile && !isLocalUnsupportedModel && onRetryAction != null
             val showGrantAccessButton = (isPermission || isWorkingDirUnreachable) && onGrantFileAccess != null
             val showSignInButton = isGuestLimit && onRequestSignIn != null
 
@@ -2218,6 +2333,64 @@ fun TranscriptEntryItem(
                                         maxLines = 1,
                                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                     )
+                                }
+                            }
+                            if (isLocalCorruptFile && onDeleteAndRedownloadModel != null) {
+                                Surface(
+                                    onClick = { onDeleteAndRedownloadModel(entry.command) },
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = NexusDanger.copy(alpha = 0.14f),
+                                    border = BorderStroke(1.dp, NexusDanger.copy(alpha = 0.4f)),
+                                    modifier = Modifier.testTag("delete_redownload_model_btn_${entry.id}")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Refresh,
+                                            contentDescription = "Delete and re-download",
+                                            tint = NexusDanger,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                        Text(
+                                            text = "Delete & Re-download",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                            color = NexusDanger,
+                                            softWrap = false,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                            if ((isLocalOom || isLocalUnsupportedModel) && onOpenLocalLlmHub != null) {
+                                Surface(
+                                    onClick = onOpenLocalLlmHub,
+                                    shape = RoundedCornerShape(999.dp),
+                                    color = NexusAccent.copy(alpha = 0.14f),
+                                    border = BorderStroke(1.dp, NexusAccent.copy(alpha = 0.4f)),
+                                    modifier = Modifier.testTag("open_local_hub_notice_btn_${entry.id}")
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Memory,
+                                            contentDescription = "Open Local LLM Hub",
+                                            tint = NexusAccent,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                        Text(
+                                            text = if (isLocalOom) "Use Smaller Model / Context" else "Select Supported Model",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
+                                            color = NexusAccent,
+                                            softWrap = false,
+                                            maxLines = 1
+                                        )
+                                    }
                                 }
                             }
                             if (showRetryButton) {
@@ -2943,7 +3116,7 @@ private fun UserAndAiMessageDarkPreview() {
                 entry = TranscriptEntry(
                     id = "preview_ai_dark_1",
                     type = "agent",
-                    text = "I inspected `/nexus_workspace` and verified that all local benchmarks passed at **28.4 tok/s**."
+                    text = "I inspected `/nexus_workspace` and verified the project directory structure."
                 ),
                 activeProviderLabel = "Anthropic Claude",
                 activeModelId = "claude-sonnet-4-20250514",

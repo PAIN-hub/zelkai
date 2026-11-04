@@ -1309,6 +1309,13 @@ fun NexusMainScreen(
                                                         },
                                                         onSyncMirrorNow = {
                                                             viewModel.syncProjectMirrorNow()
+                                                        },
+                                                        onOpenLocalLlmHub = {
+                                                            viewModel.refreshDeviceRecommendations()
+                                                            showLocalLlmHubDialog = true
+                                                        },
+                                                        onDeleteAndRedownloadModel = { modelId ->
+                                                            viewModel.deleteAndRedownloadCorruptLocalModel(modelId)
                                                         }
                                                     )
                                                 }

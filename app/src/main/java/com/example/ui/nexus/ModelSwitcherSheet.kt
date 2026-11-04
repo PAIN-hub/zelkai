@@ -306,11 +306,16 @@ fun ModelSwitcherSheet(
                             bench != null && bench.tokensPerSec > 0.0 -> "${String.format(Locale.US, "%.1f", bench.tokensPerSec)} tok/s"
                             else -> "Not benchmarked"
                         }
+                        val detailPerf = if (bench != null && bench.tokensPerSec > 0.0) {
+                            "${String.format(Locale.US, "%.1f", bench.tokensPerSec)} tok/s · TTFT ${bench.ttftMs}ms"
+                        } else {
+                            tokSecBadge
+                        }
                         ModelSwitcherRow(
                             providerId = "local",
                             modelId = spec.id,
                             title = spec.name,
-                            description = "Downloaded · ${spec.quantization} · ${spec.downloadSizeMb} MB · $tokSecBadge",
+                            description = "Downloaded · ${spec.quantization} · ${spec.downloadSizeMb} MB · $detailPerf",
                             isSelected = isSelected,
                             requiresKey = false,
                             hasKey = true,

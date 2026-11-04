@@ -2202,7 +2202,11 @@ fun AboutSettingsSubpage(
                     "SoC / ABI" to "${deviceProfile.socSummary} (${deviceProfile.primaryAbi})",
                     "CPU Topology" to deviceProfile.coreSummary,
                     "System RAM" to String.format(Locale.US, "%.1f GB total · %.1f GB free", ramGb, availRamGb),
-                    "Local LLM Engine" to "${engineInfo.name} (${if (engineInfo.isRuntimeInstalled) "Native JNI" else "Unavailable"})"
+                    "Local LLM Engine" to if (engineInfo.isRuntimeInstalled) {
+                        "${engineInfo.name} (${engineInfo.llamaCppTag} · ${engineInfo.abi})"
+                    } else {
+                        "${engineInfo.name} (Unavailable · ${engineInfo.abi})"
+                    }
                 )
 
                 rows.forEach { (label, value) ->
@@ -2294,14 +2298,37 @@ fun AboutSettingsSubpage(
             containerColor = MaterialTheme.colorScheme.surface,
             title = { Text("Open-Source Notices") },
             text = {
-                Text(
-                    text = "• Android Jetpack Compose & Material 3 (Apache 2.0)\n" +
-                        "• OkHttp & Kotlin Coroutines / Serialization (Apache 2.0)\n" +
-                        "• llama.cpp GGUF inference architecture (MIT)\n" +
-                        "• Poppins & JetBrains Mono Typography (OFL 1.1)",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "• Android Jetpack Compose & Material 3 (Apache 2.0)\n" +
+                            "• OkHttp & Kotlin Coroutines / Serialization (Apache 2.0)\n" +
+                            "• Poppins & JetBrains Mono Typography (OFL 1.1)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline)
+                    Text(
+                        text = "llama.cpp (Release Tag b12020) — MIT License\n" +
+                            "Copyright (c) 2023-2026 The ggml authors\n" +
+                            "Copyright (c) 2025-2026 Arm Limited (llama.android JNI wrapper)\n\n" +
+                            "Permission is hereby granted, free of charge, to any person obtaining a copy " +
+                            "of this software and associated documentation files (the \"Software\"), to deal " +
+                            "in the Software without restriction, including without limitation the rights " +
+                            "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell " +
+                            "copies of the Software, and to permit persons to whom the Software is " +
+                            "furnished to do so, subject to the following conditions:\n\n" +
+                            "The above copyright notice and this permission notice shall be included in all " +
+                            "copies or substantial portions of the Software.\n\n" +
+                            "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR " +
+                            "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, " +
+                            "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.",
+                        style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             },
             confirmButton = {
                 TextButton(onClick = { showLicensesDialog = false }) {
