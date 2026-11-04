@@ -10,7 +10,13 @@ import com.example.data.model.NexusSession
 import com.example.data.model.NexusUserSettings
 import com.example.data.model.TranscriptEntry
 import com.example.data.repository.NexusRepository
+import com.example.domain.ActivityLabeler
+import com.example.domain.AgentPhase
+import com.example.domain.AgentStatus
 import com.example.domain.ActiveLoadedModelState
+import com.example.domain.CommandExecutionPolicy
+import com.example.domain.GenerationOutcome
+import com.example.domain.TitleSanitizer
 import com.example.domain.AndroidShellBackend
 import com.example.domain.BackgroundJobInfo
 import com.example.domain.BackendWorkspaceFileOps
@@ -110,6 +116,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -720,8 +727,11 @@ class NexusViewModel(
     private val _streamingText = MutableStateFlow<String?>(null)
     val streamingText: StateFlow<String?> = _streamingText.asStateFlow()
 
-    private val _agentStatus = MutableStateFlow("idle")
-    val agentStatus: StateFlow<String> = _agentStatus.asStateFlow()
+    private val _agentSessionStatus = MutableStateFlow("idle")
+    val sessionStatus: StateFlow<String> = _agentSessionStatus.asStateFlow()
+
+    private val _agentStatus = MutableStateFlow<AgentStatus>(AgentStatus.Idle)
+    val agentStatus: StateFlow<AgentStatus> = _agentStatus.asStateFlow()
 
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
@@ -741,6 +751,17 @@ class NexusViewModel(
     private val _isAnalyzing = MutableStateFlow(false)
     val isAnalyzing: StateFlow<Boolean> = _isAnalyzing.asStateFlow()
 
+    /** Signed-in draft chats that exist only locally until their first message is sent. */
+    private val _localDraftSessions = MutableStateFlow<List<NexusSession>>(emptyList())
+
+    /** One-shot UI event: guest tried to open a second chat while multi-chat is locked. */
+    private val _showGuestChatLimitDialog = MutableStateFlow(false)
+    val showGuestChatLimitDialog: StateFlow<Boolean> = _showGuestChatLimitDialog.asStateFlow()
+
+    fun dismissGuestChatLimitDialog() {
+        _showGuestChatLimitDialog.value = false
+    }
+
     private val _uiBannerMessage = MutableStateFlow<String?>(null)
     val uiBannerMessage: StateFlow<String?> = _uiBannerMessage.asStateFlow()
 
@@ -756,22 +777,52 @@ class NexusViewModel(
         return if (_isTemporaryChat.value) TEMP_SESSION_ID else _activeSessionId.value
     }
 
+    /**
+     * Non-blocking cloud sync problem ("Not synced · Retry"). Firestore listener failures
+     * (e.g. "Error getting Query snapshot") never replace the chat UI any more.
+     */
+    private val _cloudSyncIssue = MutableStateFlow<String?>(null)
+    val cloudSyncIssue: StateFlow<String?> = _cloudSyncIssue.asStateFlow()
+
+    /** Bumped by [retryCloudSync] to re-subscribe Firestore listeners. */
+    private val _syncRetryTick = MutableStateFlow(0)
+
+    /** Last known good data per session, used as a local-first fallback when listeners fail. */
+    private val localEntryMirror = ConcurrentHashMap<String, List<TranscriptEntry>>()
+    @Volatile
+    private var localSessionMirror: List<NexusSession> = emptyList()
+
+    fun retryCloudSync() {
+        _cloudSyncIssue.value = null
+        _syncRetryTick.update { it + 1 }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
     val sessionsState: StateFlow<UiState<List<NexusSession>>> = combine(
         if (isGuestMode || repository == null) {
             _guestSessions.map<List<NexusSession>, UiState<List<NexusSession>>> { UiState.Success(it) }
         } else {
-            repository.observeSessions()
-                .map<List<NexusSession>, UiState<List<NexusSession>>> { list -> UiState.Success(list) }
-                .catch { e ->
-                    Log.e(TAG, "Error observing sessions", e)
-                    emit(UiState.Error(e.localizedMessage ?: "Failed to load sessions"))
-                }
+            _syncRetryTick.flatMapLatest {
+                repository.observeSessions()
+                    .map<List<NexusSession>, UiState<List<NexusSession>>> { list ->
+                        localSessionMirror = list
+                        UiState.Success(list)
+                    }
+                    .catch { e ->
+                        Log.w(TAG, "Session listener failed (${e.javaClass.simpleName}); using local sessions")
+                        _cloudSyncIssue.value = "Not synced"
+                        emit(UiState.Success(localSessionMirror))
+                    }
+            }
         },
-        _pinnedSessionIds
-    ) { state, pinnedIds ->
+        _pinnedSessionIds,
+        _localDraftSessions
+    ) { state, pinnedIds, drafts ->
         when (state) {
             is UiState.Success -> {
-                val enriched = state.data
+                val remoteIds = state.data.map { it.id }.toSet()
+                val merged = state.data + drafts.filter { it.id !in remoteIds }
+                val enriched = merged
                     .filter { !it.isTemporary && it.id != TEMP_SESSION_ID }
                     .map { it.copy(isPinned = it.id in pinnedIds) }
                 UiState.Success(enriched)
@@ -801,8 +852,9 @@ class NexusViewModel(
     @OptIn(ExperimentalCoroutinesApi::class)
     val entriesState: StateFlow<UiState<List<TranscriptEntry>>> = combine(
         _isTemporaryChat,
-        _activeSessionId
-    ) { isTemp, sessionId -> isTemp to sessionId }
+        _activeSessionId,
+        _syncRetryTick
+    ) { isTemp, sessionId, _ -> isTemp to sessionId }
         .flatMapLatest { (isTemp, sessionId) ->
             when {
                 isTemp -> {
@@ -817,18 +869,25 @@ class NexusViewModel(
                         UiState.Success(entries)
                     }
                 }
+                _localDraftSessions.value.any { it.id == sessionId } -> {
+                    // Lazy draft: not stored remotely until the first message, so there is nothing to observe.
+                    flowOf<UiState<List<TranscriptEntry>>>(UiState.Success(localEntryMirror[sessionId].orEmpty()))
+                }
                 else -> {
                     combine(
                         repository.observeEntries(sessionId),
                         _optimisticallyTruncatedIds
                     ) { entries, truncatedIds ->
                         val filtered = if (truncatedIds.isEmpty()) entries else entries.filter { it.id !in truncatedIds }
+                        localEntryMirror[sessionId] = filtered
                         resolveApprovalsFromEntries(filtered)
                         UiState.Success(filtered) as UiState<List<TranscriptEntry>>
                     }
                         .catch { e ->
-                            Log.e(TAG, "Error observing entries for $sessionId", e)
-                            emit(UiState.Error(e.localizedMessage ?: "Failed to observe session transcript"))
+                            // Never replace the chat with a full-screen error: degrade to local data.
+                            Log.w(TAG, "Transcript listener failed (${e.javaClass.simpleName}); using local entries")
+                            _cloudSyncIssue.value = "Not synced"
+                            emit(UiState.Success(localEntryMirror[sessionId].orEmpty()))
                         }
                 }
             }
@@ -983,7 +1042,7 @@ class NexusViewModel(
         refreshAvailableProjects()
 
         viewModelScope.launch {
-            syncCurrentSessionStats(status = _agentStatus.value)
+            syncCurrentSessionStats(status = _agentSessionStatus.value)
             if (emitSwitchNotice && previousSlug != cleanSlug) {
                 appendEntryOrLocal(
                     sessionId = activeEffectiveSessionId(),
@@ -1011,7 +1070,7 @@ class NexusViewModel(
         _currentWorkingDir.value = shellBridge.currentCwd
         termuxBackend?.resetSessionCwd(_currentWorkingDir.value)
         viewModelScope.launch {
-            syncCurrentSessionStats(status = _agentStatus.value)
+            syncCurrentSessionStats(status = _agentSessionStatus.value)
             appendEntryOrLocal(
                 sessionId = activeEffectiveSessionId(),
                 type = "notice",
@@ -2301,7 +2360,11 @@ class NexusViewModel(
         exitCode: Long = 0L,
         output: String = "",
         redactions: Long = 0L,
-        noticeKind: String = ""
+        noticeKind: String = "",
+        title: String = "",
+        reasoningText: String = "",
+        thinkingDurationSec: Long = 0L,
+        jobId: String = ""
     ): Result<String> {
         if (_isTemporaryChat.value || sessionId == TEMP_SESSION_ID) {
             val newId = "temp_entry_${UUID.randomUUID().toString().replace("-", "").take(12)}"
@@ -2321,7 +2384,11 @@ class NexusViewModel(
                 output = output,
                 redactions = redactions,
                 noticeKind = noticeKind,
-                sequence = sequence
+                sequence = sequence,
+                title = title,
+                reasoningText = reasoningText,
+                thinkingDurationSec = thinkingDurationSec,
+                jobId = jobId
             )
             _temporaryEntries.update { it + newEntry }
             return Result.success(newId)
@@ -2344,7 +2411,11 @@ class NexusViewModel(
                 output = output,
                 redactions = redactions,
                 noticeKind = noticeKind,
-                sequence = sequence
+                sequence = sequence,
+                title = title,
+                reasoningText = reasoningText,
+                thinkingDurationSec = thinkingDurationSec,
+                jobId = jobId
             )
             _guestEntries.update { it + newEntry }
             return Result.success(newId)
@@ -2363,7 +2434,11 @@ class NexusViewModel(
             exitCode = exitCode,
             output = output,
             redactions = redactions,
-            noticeKind = noticeKind
+            noticeKind = noticeKind,
+            title = title.takeIf { it.isNotBlank() },
+            reasoningText = reasoningText.takeIf { it.isNotBlank() },
+            thinkingDurationSec = thinkingDurationSec.takeIf { it > 0 },
+            jobId = jobId.takeIf { it.isNotBlank() }
         )
     }
 
@@ -2412,7 +2487,7 @@ class NexusViewModel(
             syncPersonalizationToCloudSettings()
             viewModelScope.launch {
                 val sessionId = activeEffectiveSessionId()
-                syncCurrentSessionStats(status = _agentStatus.value)
+                syncCurrentSessionStats(status = _agentSessionStatus.value)
                 appendEntryOrLocal(
                     sessionId = sessionId,
                     type = "notice",
@@ -2693,7 +2768,8 @@ class NexusViewModel(
                 )
             } finally {
                 _isRunning.value = false
-                _agentStatus.value = "idle"
+                _agentSessionStatus.value = "idle"
+                _agentStatus.value = AgentStatus.Idle
             }
         }
     }
@@ -2847,7 +2923,7 @@ class NexusViewModel(
         _settings.value = sanitized
         viewModelScope.launch {
             saveUserSettingsOrLocal(sanitized)
-            syncCurrentSessionStats(status = _agentStatus.value)
+            syncCurrentSessionStats(status = _agentSessionStatus.value)
         }
     }
 
@@ -3113,10 +3189,24 @@ class NexusViewModel(
         }
     }
 
-    fun createNewSession(customTitle: String = "") {
+    /**
+     * New chat (local-first, never a silent no-op):
+     * - Immediately clears streaming/run state and switches to an empty draft (the UI closes the drawer).
+     * - If the current chat is already an empty draft, it is reused.
+     * - Signed-in: the session is only written to Firestore lazily on the first message
+     *   ([ensureActiveSessionPersisted]); a failed sync shows "Not synced · Retry" instead of blocking.
+     * - Guest: single local chat is reset; if multi-chat was explicitly requested while locked,
+     *   [showGuestChatLimitDialog] explains the limit and offers Sign in.
+     */
+    fun createNewSession(customTitle: String = "", requestedAdditionalChat: Boolean = false) {
         if (_isRunning.value) stopRunningAgent()
         _isTemporaryChat.value = false
+        _streamingText.value = ""
         if (isGuestMode) {
+            val hasMessages = _guestEntries.value.any { it.type == "user" }
+            if (requestedAdditionalChat && hasMessages) {
+                _showGuestChatLimitDialog.value = true
+            }
             _guestEntries.value = emptyList()
             _guestSessions.update { list ->
                 list.map {
@@ -3133,29 +3223,72 @@ class NexusViewModel(
             }
             return
         }
-        val repo = repository ?: return
-        viewModelScope.launch {
-            val title = customTitle.trim().ifBlank { "New chat" }
-            val freshCwd = shellBridge.currentCwd
-            _currentWorkingDir.value = freshCwd
-            val cfg = _settings.value
-            val res = repo.createSession(
-                title = title,
-                cwd = freshCwd,
-                provider = NexusToolAndRedactor.providerDisplayLabel(selectedProvider.value),
-                model = selectedModelId.value
-            )
-            res.onSuccess { newId ->
+        if (repository == null) return
+
+        // Reuse the current chat if it is already an empty draft.
+        val currentId = _activeSessionId.value
+        val currentIsDraft = _localDraftSessions.value.any { it.id == currentId }
+        val currentEntries = (entriesState.value as? UiState.Success)?.data.orEmpty()
+        if (currentIsDraft && currentEntries.none { it.type == "user" }) {
+            return
+        }
+
+        val draftId = "draft_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+        val freshCwd = shellBridge.currentCwd
+        _currentWorkingDir.value = freshCwd
+        val draft = NexusSession(
+            id = draftId,
+            userId = currentUserId.orEmpty(),
+            title = customTitle.trim().ifBlank { "New chat" },
+            status = "idle",
+            cwd = freshCwd,
+            provider = NexusToolAndRedactor.providerDisplayLabel(selectedProvider.value),
+            model = selectedModelId.value
+        )
+        // Drop any other untouched drafts so the sidebar never fills with empty chats.
+        _localDraftSessions.update { list ->
+            list.filter { d -> localEntryMirror[d.id].orEmpty().any { it.type == "user" } } + draft
+        }
+        localEntryMirror[draftId] = emptyList()
+        _activeSessionId.value = draftId
+        _settings.update { it.copy(activeSessionId = draftId) }
+    }
+
+    /**
+     * Persists a lazily-created draft session to Firestore before its first entry is written.
+     * Returns the id to write entries under. On failure, keeps the local draft and flags
+     * "Not synced" (never blocks the chat).
+     */
+    private suspend fun ensureActiveSessionPersisted(): String {
+        val sessionId = _activeSessionId.value
+        val draft = _localDraftSessions.value.firstOrNull { it.id == sessionId } ?: return sessionId
+        val repo = repository ?: return sessionId
+        val res = repo.createSession(
+            title = draft.title,
+            cwd = draft.cwd,
+            provider = draft.provider,
+            model = draft.model
+        )
+        return res.fold(
+            onSuccess = { newId ->
+                _localDraftSessions.update { list -> list.filterNot { it.id == sessionId } }
+                localEntryMirror.remove(sessionId)
                 _activeSessionId.value = newId
-                val updated = cfg.copy(
+                val updated = _settings.value.copy(
                     provider = selectedProvider.value,
                     selectedModel = selectedModelId.value,
                     activeSessionId = newId
                 )
                 _settings.value = updated
-                repo.ensureOrSaveUserSettings(updated)
+                runCatching { repo.ensureOrSaveUserSettings(updated) }
+                newId
+            },
+            onFailure = { e ->
+                Log.w(TAG, "Draft session sync failed (${e.javaClass.simpleName})")
+                _cloudSyncIssue.value = "Not synced"
+                sessionId
             }
-        }
+        )
     }
 
     fun onClearClicked() {
@@ -3263,7 +3396,13 @@ class NexusViewModel(
         val activeProvLabel = NexusToolAndRedactor.providerDisplayLabel(selectedProvider.value)
         val activeModId = selectedModelId.value
         val effectiveCwd = _currentWorkingDir.value.ifBlank { shellBridge.currentCwd }
-        _agentStatus.value = status
+        _agentSessionStatus.value = status
+        _agentStatus.value = when (status) {
+            "stream" -> AgentStatus.Working(AgentPhase.WRITING)
+            "wait" -> AgentStatus.Working(AgentPhase.WAITING_FOR_APPROVAL)
+            "exec" -> AgentStatus.Working(AgentPhase.RUNNING_COMMAND)
+            else -> AgentStatus.Idle
+        }
         _currentWorkingDir.value = effectiveCwd
 
         if (_isTemporaryChat.value || sessionId == TEMP_SESSION_ID) {
@@ -3451,6 +3590,11 @@ class NexusViewModel(
         activeAgentJob = viewModelScope.launch {
             _isRunning.value = true
             try {
+                val effectiveSessionId = if (isGuestMode || _isTemporaryChat.value) {
+                    activeEffectiveSessionId()
+                } else {
+                    ensureActiveSessionPersisted()
+                }
                 val curSession = currentSessionModel()
                 val isDefaultTitle = curSession != null && (
                     curSession.title.equals("New chat", ignoreCase = true) ||
@@ -3464,7 +3608,7 @@ class NexusViewModel(
 
                 val userSeq = nextSequence()
                 val userEntryRes = appendEntryOrLocal(
-                    sessionId = sessionId,
+                    sessionId = effectiveSessionId,
                     type = "user",
                     sequence = userSeq,
                     text = prompt,
@@ -3473,7 +3617,7 @@ class NexusViewModel(
                 val initialUserEntry = TranscriptEntry(
                     id = userEntryRes.getOrNull() ?: "local_user_$userSeq",
                     userId = currentUserId,
-                    sessionId = sessionId,
+                    sessionId = effectiveSessionId,
                     type = "user",
                     text = prompt,
                     cwd = shellBridge.currentCwd,
@@ -3481,7 +3625,7 @@ class NexusViewModel(
                 )
 
                 runAgentLoop(
-                    sessionId = sessionId,
+                    sessionId = effectiveSessionId,
                     cfg = cfg,
                     initialTitle = newTitle,
                     initialUserEntry = initialUserEntry,
@@ -3646,6 +3790,7 @@ class NexusViewModel(
                 _isRunning.value = false
                 userRequestedStop = false
                 syncCurrentSessionStats(status = "idle")
+                _agentStatus.value = AgentStatus.Idle
             }
         }
     }
@@ -3795,11 +3940,17 @@ class NexusViewModel(
         workingEntries.removeAll { it.id == initialUserEntry.id }
         workingEntries.add(initialUserEntry)
 
+        var retriedNoTokens = false
+        var followUpCount = 0
+
         for (step in 0 until maxSteps) {
             syncCurrentSessionStats(
                 status = "stream",
                 updatedTitle = if (step == 0) initialTitle else null
             )
+
+            val stepStartTime = System.currentTimeMillis()
+            _agentStatus.value = AgentStatus.Working(AgentPhase.THINKING)
 
             val accumulated = StringBuilder()
             _streamingText.value = ""
@@ -3821,6 +3972,7 @@ class NexusViewModel(
                 ).collect { delta ->
                     if (delta.isNotEmpty()) {
                         accumulated.append(delta)
+                        _agentStatus.value = AgentStatus.Working(AgentPhase.WRITING)
                         _streamingText.value = stripToolTagsForDisplay(accumulated.toString())
                     }
                 }
@@ -3839,9 +3991,83 @@ class NexusViewModel(
                 allowMultiLineIfApproved = false
             )
 
+            val parsedThinking = ThinkingTagParser.parse(fullRawText)
+            val thinkingDuration = ((System.currentTimeMillis() - stepStartTime) / 1000L).coerceAtLeast(0L)
+            val outcome = GenerationOutcome.classify(
+                rawText = fullRawText,
+                finishReason = if (userRequestedStop) "cancelled" else "eos",
+                toolCallCount = if (parseResult is ToolCallParseResult.Success) 1 else 0
+            )
+
+            when (outcome) {
+                is GenerationOutcome.NoTokens -> {
+                    if (activeProv == "local" && !retriedNoTokens) {
+                        retriedNoTokens = true
+                        logPipelineStage("RETRY_NO_TOKENS", "Resetting native engine and retrying once")
+                        localLlmManager.unloadActiveLocalModel()
+                        continue
+                    }
+                    _agentStatus.value = AgentStatus.Error("Model returned no tokens")
+                    appendEntryOrLocal(
+                        sessionId = sessionId,
+                        type = "notice",
+                        sequence = nextSequence(),
+                        text = "Inference failed: Model returned an empty response. Tap Retry, Reload model, or switch to a cloud model.",
+                        noticeKind = "error",
+                        cwd = _currentWorkingDir.value
+                    )
+                    return
+                }
+
+                is GenerationOutcome.ReasoningOnly -> {
+                    val agentSeq = nextSequence()
+                    val agentRes = appendEntryOrLocal(
+                        sessionId = sessionId,
+                        type = "agent",
+                        sequence = agentSeq,
+                        text = fullRawText,
+                        reasoningText = parsedThinking.thinkingText,
+                        thinkingDurationSec = thinkingDuration,
+                        cwd = _currentWorkingDir.value
+                    )
+                    workingEntries.add(
+                        TranscriptEntry(
+                            id = agentRes.getOrNull() ?: "local_agent_${step}_$agentSeq",
+                            userId = currentUserId,
+                            sessionId = sessionId,
+                            type = "agent",
+                            text = fullRawText,
+                            reasoningText = parsedThinking.thinkingText,
+                            thinkingDurationSec = thinkingDuration,
+                            cwd = _currentWorkingDir.value,
+                            sequence = agentSeq
+                        )
+                    )
+                    if (followUpCount < 1) {
+                        followUpCount++
+                        logPipelineStage("AUTO_FOLLOWUP_REASONING_ONLY", "Sending follow-up prompt for final answer")
+                        val followUpUserEntry = TranscriptEntry(
+                            id = "auto_followup_${UUID.randomUUID().toString().take(8)}",
+                            userId = currentUserId,
+                            sessionId = sessionId,
+                            type = "user",
+                            text = "Give your final answer now.",
+                            cwd = _currentWorkingDir.value,
+                            sequence = nextSequence()
+                        )
+                        workingEntries.add(followUpUserEntry)
+                        continue
+                    }
+                    _agentStatus.value = AgentStatus.Idle
+                    return
+                }
+                else -> Unit
+            }
+
             when (parseResult) {
                 is ToolCallParseResult.ParseError -> {
                     logPipelineStage("2_DROP_AT_TOOL_CALL_PARSER", parseResult.message)
+                    _agentStatus.value = AgentStatus.Error("Tool-call parse failed")
                     appendEntryOrLocal(
                         sessionId = sessionId,
                         type = "notice",
@@ -3855,14 +4081,18 @@ class NexusViewModel(
 
                 is ToolCallParseResult.NoToolCall -> {
                     logPipelineStage("2_TOOL_CALL_PARSER", "Plain-text turn (no command block emitted); completing turn.")
-                    val cleanMarkdown = stripToolTagsForDisplay(fullRawText)
-                    if (cleanMarkdown.isNotBlank()) {
+                    val cleanMarkdown = GenerationOutcome.stripForDisplay(
+                        if (parsedThinking.thinkingText.isNotBlank()) parsedThinking.visibleText else fullRawText
+                    )
+                    if (cleanMarkdown.isNotBlank() || parsedThinking.thinkingText.isNotBlank()) {
                         val agentSeq = nextSequence()
                         val agentRes = appendEntryOrLocal(
                             sessionId = sessionId,
                             type = "agent",
                             sequence = agentSeq,
                             text = cleanMarkdown,
+                            reasoningText = parsedThinking.thinkingText,
+                            thinkingDurationSec = thinkingDuration,
                             cwd = _currentWorkingDir.value
                         )
                         workingEntries.add(
@@ -3872,6 +4102,8 @@ class NexusViewModel(
                                 sessionId = sessionId,
                                 type = "agent",
                                 text = cleanMarkdown,
+                                reasoningText = parsedThinking.thinkingText,
+                                thinkingDurationSec = thinkingDuration,
                                 cwd = _currentWorkingDir.value,
                                 sequence = agentSeq
                             )
@@ -3887,12 +4119,14 @@ class NexusViewModel(
                             cwd = _currentWorkingDir.value
                         )
                     }
+                    _agentStatus.value = AgentStatus.Idle
                     return
                 }
 
                 is ToolCallParseResult.Success -> {
                     val toolCall: ToolCall = parseResult.toolCall
-                    val parsedThinking = ThinkingTagParser.parse(fullRawText)
+                    val stepTitle = TitleSanitizer.sanitize(toolCall.explicitTitle)
+                        ?: ActivityLabeler.label(toolCall.command)
                     val thinkingBlockPrefix = if (parsedThinking.thinkingText.isNotEmpty()) {
                         "<think>\n${parsedThinking.thinkingText}\n</think>\n\n"
                     } else {
@@ -3901,7 +4135,7 @@ class NexusViewModel(
                     val assistantText = (thinkingBlockPrefix + parseResult.cleanedAssistantText).trim()
                     logPipelineStage(
                         stage = "2_TOOL_CALL_PARSER",
-                        detail = "Parsed command='${toolCall.command}', source=${toolCall.source}, risk=${toolCall.riskLevel}"
+                        detail = "Parsed command='${toolCall.command}', source=${toolCall.source}, risk=${toolCall.riskLevel}, title='$stepTitle'"
                     )
 
                     if (assistantText.isNotBlank()) {
@@ -3911,6 +4145,8 @@ class NexusViewModel(
                             type = "agent",
                             sequence = agentSeq,
                             text = assistantText,
+                            reasoningText = parsedThinking.thinkingText,
+                            thinkingDurationSec = thinkingDuration,
                             cwd = _currentWorkingDir.value
                         )
                         workingEntries.add(
@@ -3920,10 +4156,107 @@ class NexusViewModel(
                                 sessionId = sessionId,
                                 type = "agent",
                                 text = parseResult.cleanedAssistantText,
+                                reasoningText = parsedThinking.thinkingText,
+                                thinkingDurationSec = thinkingDuration,
                                 cwd = _currentWorkingDir.value,
                                 sequence = agentSeq
                             )
                         )
+                    }
+
+                    // Handle Write File tool action
+                    if (toolCall.actionKind == ToolActionKind.WRITE_FILE) {
+                        _agentStatus.value = AgentStatus.Working(AgentPhase.RUNNING_COMMAND)
+                        val relPath = toolCall.targetFilePath ?: "file.txt"
+                        val targetFile = java.io.File(_currentWorkingDir.value, relPath)
+                        val content = toolCall.targetFileContent.orEmpty()
+                        val writeResult = runCatching {
+                            targetFile.parentFile?.mkdirs()
+                            targetFile.writeText(content)
+                        }
+                        val outSeq = nextSequence()
+                        val isSuccess = writeResult.isSuccess
+                        val outputText = if (isSuccess) "Wrote ${content.length} characters to $relPath" else "Failed to write file: ${writeResult.exceptionOrNull()?.message}"
+                        val exitCode = if (isSuccess) 0L else 1L
+                        val outRes = appendEntryOrLocal(
+                            sessionId = sessionId,
+                            type = "output",
+                            sequence = outSeq,
+                            command = "write_file $relPath",
+                            cwd = _currentWorkingDir.value,
+                            exitCode = exitCode,
+                            output = outputText,
+                            title = stepTitle,
+                            redactions = 0L
+                        )
+                        val feedback = ToolCallParser.formatToolOutputForModelFeedback(
+                            command = "write_file $relPath",
+                            cwd = _currentWorkingDir.value,
+                            exitCode = exitCode.toInt(),
+                            rawOutput = outputText,
+                            extraSecrets = userApiKeyStore.allSavedSecretsForRedaction(),
+                            maxChars = 2000
+                        )
+                        workingEntries.add(
+                            TranscriptEntry(
+                                id = outRes.getOrNull() ?: "local_output_${step}_$outSeq",
+                                userId = currentUserId,
+                                sessionId = sessionId,
+                                type = "output",
+                                command = "write_file $relPath",
+                                cwd = _currentWorkingDir.value,
+                                exitCode = exitCode,
+                                output = feedback,
+                                title = stepTitle,
+                                sequence = outSeq
+                            )
+                        )
+                        continue
+                    }
+
+                    // Handle Wait For Job tool action
+                    if (toolCall.actionKind == ToolActionKind.WAIT_FOR_JOB) {
+                        _agentStatus.value = AgentStatus.Working(AgentPhase.WAITING_FOR_JOB)
+                        val job = jobManager.waitForJob(toolCall.jobId, toolCall.waitMaxSeconds)
+                        val logs = jobManager.getJobLogs(toolCall.jobId, 50).joinToString("\n")
+                        val exitCode = job?.exitCode?.toLong() ?: if (job?.state == ManagedJobState.EXITED) 0L else 1L
+                        val outSeq = nextSequence()
+                        val outRes = appendEntryOrLocal(
+                            sessionId = sessionId,
+                            type = "output",
+                            sequence = outSeq,
+                            command = "wait_for_job ${toolCall.jobId}",
+                            cwd = _currentWorkingDir.value,
+                            exitCode = exitCode,
+                            output = logs.ifBlank { "Job ${toolCall.jobId} state=${job?.state?.id}" },
+                            title = stepTitle,
+                            jobId = toolCall.jobId,
+                            redactions = 0L
+                        )
+                        val feedback = ToolCallParser.formatToolOutputForModelFeedback(
+                            command = "wait_for_job ${toolCall.jobId}",
+                            cwd = _currentWorkingDir.value,
+                            exitCode = exitCode.toInt(),
+                            rawOutput = logs,
+                            extraSecrets = userApiKeyStore.allSavedSecretsForRedaction(),
+                            maxChars = 2000
+                        )
+                        workingEntries.add(
+                            TranscriptEntry(
+                                id = outRes.getOrNull() ?: "local_output_${step}_$outSeq",
+                                userId = currentUserId,
+                                sessionId = sessionId,
+                                type = "output",
+                                command = "wait_for_job ${toolCall.jobId}",
+                                cwd = _currentWorkingDir.value,
+                                exitCode = exitCode,
+                                output = feedback,
+                                title = stepTitle,
+                                jobId = toolCall.jobId,
+                                sequence = outSeq
+                            )
+                        )
+                        continue
                     }
 
                     // Stage 2.5: Toolchain prerequisite check
@@ -4034,7 +4367,8 @@ class NexusViewModel(
                         commandStatus = if (requiresApproval) "pending" else "approved",
                         isRisky = isHighRisk,
                         timeoutSec = effectiveTimeout,
-                        cwd = _currentWorkingDir.value
+                        cwd = _currentWorkingDir.value,
+                        title = stepTitle
                     )
                     val entryId = createRes.getOrNull() ?: "cmd_${step}_$cmdSeq"
 
@@ -4393,6 +4727,7 @@ class NexusViewModel(
                         cwd = execResult.cwd,
                         exitCode = execResult.exitCode.toLong(),
                         output = clippedOutput,
+                        title = stepTitle,
                         redactions = execResult.redactions.toLong()
                     )
                     val outId = outRes.getOrNull() ?: "local_output_${step}_$outSeq"
@@ -4402,15 +4737,17 @@ class NexusViewModel(
                     // Surface explicit error card with Retry on timeout or bridge error (Fix #8)
                     if (execResult.exitCode == 124) {
                         logPipelineStage("DROP_AT_BRIDGE_TIMEOUT", "Command '${toolCall.command}' timed out after ${execResult.timeoutSec}s")
+                        val timeoutHint = CommandExecutionPolicy.timeoutHint(toolCall.command, execResult.timeoutSec)
                         appendEntryOrLocal(
                             sessionId = sessionId,
                             type = "notice",
                             sequence = nextSequence(),
-                            text = "Command timed out after ${execResult.timeoutSec}s: `${toolCall.command}`. This long-running command can run as a background job.",
+                            text = timeoutHint,
                             noticeKind = "timeout_bg_offer",
                             command = toolCall.command,
                             cwd = execResult.cwd
                         )
+                        _agentStatus.value = AgentStatus.Idle
                         return
                     } else if ((activeBackend.backendType == ExecutionBackendType.ANDROID_SHELL && !shellBridge.isOnline) || execResult.stderr.startsWith("Bridge unreachable")) {
                         logPipelineStage("DROP_AT_BRIDGE_ERROR", execResult.stderr)

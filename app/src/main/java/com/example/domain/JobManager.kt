@@ -49,7 +49,12 @@ data class ManagedJobRecord(
     val state: ManagedJobState = ManagedJobState.RUNNING,
     val exitCode: Int? = null,
     val lastReadByteOffset: Long = 0L,
-    val logLines: List<String> = emptyList()
+    val logLines: List<String> = emptyList(),
+    val title: String = "",
+    val originSessionId: String = "",
+    val originTurnId: String = "",
+    val resultPending: Boolean = false,
+    val resumePolicy: String = "foreground"
 ) {
     fun uptimeSummary(nowMs: Long = System.currentTimeMillis()): String {
         val elapsedSec = ((nowMs - startedAtMs) / 1000L).coerceAtLeast(0L)
@@ -476,6 +481,18 @@ class JobManager(
             logLines = (current.logLines + "[Job stopped by user (SIGTERM -> SIGKILL)]").takeLast(MAX_UI_LOG_LINES)
         )
         updateJobRecord(stopped)
+    }
+
+    suspend fun waitForJob(jobId: String, maxSeconds: Long = 30L): ManagedJobRecord? = withContext(Dispatchers.IO) {
+        val deadline = System.currentTimeMillis() + (maxSeconds.coerceIn(1L, 120L) * 1000L)
+        while (System.currentTimeMillis() < deadline) {
+            val job = pollJobStatus(jobId, notifyOnExit = true) ?: _jobs.value.firstOrNull { it.id == jobId }
+            if (job == null || job.state == ManagedJobState.EXITED || job.state == ManagedJobState.STOPPED || job.state == ManagedJobState.LOST) {
+                return@withContext job
+            }
+            kotlinx.coroutines.delay(1000L)
+        }
+        pollJobStatus(jobId, notifyOnExit = false) ?: _jobs.value.firstOrNull { it.id == jobId }
     }
 
     suspend fun stopAllJobs() {

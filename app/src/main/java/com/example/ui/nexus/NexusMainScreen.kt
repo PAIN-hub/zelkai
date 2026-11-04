@@ -55,6 +55,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.NotificationsActive
@@ -62,6 +63,8 @@ import androidx.compose.material.icons.filled.PersonOutline
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.DropdownMenu
@@ -71,6 +74,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -123,11 +127,15 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import com.example.R
 import com.example.data.model.TranscriptEntry
 import com.example.data.repository.NexusRepository
+import com.example.domain.AgentPhase
+import com.example.domain.AgentStatus
 import com.example.domain.LocalLlmManager
 import com.example.domain.LocalModelDownloadState
 import com.example.domain.LocalShellBridge
 import com.example.domain.NexusPersonalizationStore
 import com.example.domain.NexusToolAndRedactor
+import com.example.domain.TimelineBlock
+import com.example.domain.TurnTimelineBuilder
 import com.example.domain.ProviderModelRepository
 import com.example.domain.UserApiKeyStore
 import com.example.ui.auth.signOutFromNexus
@@ -267,6 +275,9 @@ fun NexusMainScreen(
     val isBenchmarking by viewModel.isBenchmarking.collectAsStateWithLifecycle()
     val loadGuardError by viewModel.loadGuardError.collectAsStateWithLifecycle()
     val missingApiKeyPrompt by viewModel.missingApiKeyPrompt.collectAsStateWithLifecycle()
+    val showGuestChatLimitDialog by viewModel.showGuestChatLimitDialog.collectAsStateWithLifecycle()
+    val cloudSyncIssue by viewModel.cloudSyncIssue.collectAsStateWithLifecycle()
+    val sessionStatus by viewModel.sessionStatus.collectAsStateWithLifecycle()
 
     // ExecutionBackend & Background Jobs StateFlows (Part 2)
     val environmentDescription by viewModel.environmentDescription.collectAsStateWithLifecycle()
@@ -516,10 +527,10 @@ fun NexusMainScreen(
         }
     }
 
-    val effectiveStatus = when {
-        hasPendingApproval -> "awaiting_approval"
-        streamingText != null -> "streaming"
-        else -> activeSession?.status ?: agentStatus
+    val effectiveAgentStatus: AgentStatus = when {
+        hasPendingApproval -> AgentStatus.Working(AgentPhase.WAITING_FOR_APPROVAL)
+        streamingText != null -> AgentStatus.Working(AgentPhase.WRITING)
+        else -> agentStatus
     }
 
     // Determine whether the chat is in its empty state (no user/agent/command entries and no active missing-key/load-guard cards)
@@ -678,7 +689,7 @@ fun NexusMainScreen(
                 isPermanentRail = isPermanentRail,
                 isGuestMode = isGuestMode,
                 isTemporaryChat = isTemporaryChat,
-                status = effectiveStatus,
+                status = effectiveAgentStatus,
                 hasPendingBadge = hasPendingApproval || activeDownloads.isNotEmpty(),
                 userFirstName = userFirstName,
                 viewMode = viewMode,
@@ -687,9 +698,20 @@ fun NexusMainScreen(
                         if (drawerState.isOpen) drawerState.close() else drawerState.open()
                     }
                 },
+                onNewChatClick = {
+                    viewModel.createNewSession()
+                    viewMode = NexusViewMode.CHAT
+                },
                 onCenterPillClick = {
-                    if (isGuestMode) {
-                        triggerGuestSignInUpgrade()
+                    val currentErr = effectiveAgentStatus as? AgentStatus.Error
+                    if (currentErr?.targetEntryId != null) {
+                        val targetIdx = entries.indexOfFirst { it.id == currentErr.targetEntryId }
+                        if (targetIdx >= 0) {
+                            scope.launch { listState.animateScrollToItem(targetIdx) }
+                        } else {
+                            viewModel.refreshProviderModels(forceNetwork = false)
+                            showSettingsDialog = true
+                        }
                     } else {
                         viewModel.refreshProviderModels(forceNetwork = false)
                         showSettingsDialog = true
@@ -1165,7 +1187,7 @@ fun NexusMainScreen(
                                     TerminalInterface(
                                         entries = state.data,
                                         streamingText = streamingText,
-                                        agentStatus = activeSession?.status ?: agentStatus,
+                                        agentStatus = activeSession?.status ?: sessionStatus,
                                         isRunning = isRunning,
                                         activeProviderLabel = activeProviderBadge,
                                         activeModelId = selectedModelId,
@@ -1206,6 +1228,9 @@ fun NexusMainScreen(
                                             modifier = Modifier.fillMaxSize(),
                                             contentAlignment = Alignment.TopCenter
                                         ) {
+                                            val turns = remember(state.data, isRunning) {
+                                                TurnTimelineBuilder.partitionIntoTurns(state.data, isRunning)
+                                            }
                                             LazyColumn(
                                                 state = listState,
                                                 modifier = Modifier
@@ -1255,119 +1280,189 @@ fun NexusMainScreen(
                                                     }
                                                 }
 
-                                                itemsIndexed(
-                                                    items = state.data,
-                                                    key = { _, it -> it.id.ifBlank { "${it.sequence}_${it.type}" } }
-                                                ) { index, entry ->
-                                                    val laterCount = (state.data.size - 1 - index).coerceAtLeast(0)
-                                                    TranscriptEntryItem(
-                                                        entry = entry,
-                                                        activeProviderLabel = activeProviderBadge,
-                                                        activeModelId = selectedModelId,
-                                                        isDarkTheme = isDarkTheme,
-                                                        feedbackState = messageFeedback[entry.id],
-                                                        laterEntriesCount = laterCount,
-                                                        onApproveCommand = { viewModel.resolveCommandPermission(it, true) },
-                                                        onDenyCommand = { viewModel.resolveCommandPermission(it, false) },
-                                                        onAnalyzeWithGemini = { viewModel.analyzeEntryWithGemini(it) },
-                                                        onSwitchToTerminal = { viewMode = NexusViewMode.TERMINAL },
-                                                        onRegenerate = { viewModel.regenerateFromEntry(it) },
-                                                        onEditAndResubmit = { targetEntry, editedText ->
-                                                            viewModel.editAndResubmitPrompt(targetEntry, editedText)
-                                                        },
-                                                        onToggleFeedback = { targetEntry, kind ->
-                                                            viewModel.toggleMessageFeedback(targetEntry.id, kind)
-                                                        },
-                                                        onRetryAction = { viewModel.retryLastFailedAction() },
-                                                        onGrantFileAccess = requestAllFilesAccess,
-                                                        onRequestSignIn = triggerGuestSignInUpgrade,
-                                                        onOpenEnvironmentSetup = {
-                                                            viewModel.refreshExecutionEnvironment()
-                                                            viewModel.runDiagnostics()
-                                                            showEnvironmentSetupScreen = true
-                                                        },
-                                                        onFallbackLimitedShell = { cmd ->
-                                                            viewModel.executeFallbackInLimitedShell(cmd)
-                                                        },
-                                                        onRerunAsBackgroundJob = { cmd ->
-                                                            viewModel.startBackgroundJob(cmd)
-                                                        },
-                                                        onUseTermuxHome = {
-                                                            viewModel.selectWorkspaceMode(com.example.domain.WorkspaceMode.TERMUX_HOME)
-                                                        },
-                                                        onMoveProjectToTermuxHome = { cmd ->
-                                                            viewModel.proposeMoveProjectToTermuxHome(cmd)
-                                                        },
-                                                        onKeepProjectInSharedStorage = {
-                                                            viewModel.keepProjectInSharedStorage()
-                                                        },
-                                                        onConfirmProjectSlug = { slug, bindExisting ->
-                                                            viewModel.confirmPendingProjectProposal(slug, bindExisting)
-                                                        },
-                                                        onImportMirrorFromShared = {
-                                                            viewModel.importFromSharedToTermuxHome()
-                                                        },
-                                                        onSyncMirrorNow = {
-                                                            viewModel.syncProjectMirrorNow()
-                                                        },
-                                                        onOpenLocalLlmHub = {
-                                                            viewModel.refreshDeviceRecommendations()
-                                                            showLocalLlmHubDialog = true
-                                                        },
-                                                        onDeleteAndRedownloadModel = { modelId ->
-                                                            viewModel.deleteAndRedownloadCorruptLocalModel(modelId)
-                                                        }
-                                                    )
-                                                }
-
-                                                if (streamingText != null) {
-                                                    item(key = "live_streaming_block") {
-                                                        Column(
+                                                // Non-blocking cloud sync notice banner ("Signed in, but sync failed · Retry")
+                                                if (cloudSyncIssue != null) {
+                                                    item(key = "cloud_sync_issue_banner") {
+                                                        Surface(
                                                             modifier = Modifier
                                                                 .fillMaxWidth()
                                                                 .padding(vertical = 4.dp),
-                                                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                                                            shape = RoundedCornerShape(8.dp),
+                                                            color = NexusWarn.copy(alpha = 0.12f),
+                                                            border = BorderStroke(1.dp, NexusWarn.copy(alpha = 0.35f))
                                                         ) {
                                                             Row(
-                                                                modifier = Modifier.fillMaxWidth(),
+                                                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                                                                 verticalAlignment = Alignment.CenterVertically,
                                                                 horizontalArrangement = Arrangement.SpaceBetween
                                                             ) {
-                                                                Row(
-                                                                    verticalAlignment = Alignment.CenterVertically,
-                                                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                                                Text(
+                                                                    text = "Signed in, but sync failed",
+                                                                    style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                                                                    color = MaterialTheme.colorScheme.onSurface
+                                                                )
+                                                                TextButton(
+                                                                    onClick = { viewModel.retryCloudSync() },
+                                                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
                                                                 ) {
-                                                                    StatusDotIndicator(status = "streaming")
+                                                                    Text(
+                                                                        text = "Retry",
+                                                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                                                        color = NexusAccent
+                                                                    )
                                                                 }
-                                                                Surface(
-                                                                    onClick = { viewMode = NexusViewMode.TERMINAL },
-                                                                    shape = RoundedCornerShape(999.dp),
-                                                                    color = MaterialTheme.colorScheme.surfaceVariant,
-                                                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
-                                                                ) {
-                                                                    Row(
-                                                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
-                                                                        verticalAlignment = Alignment.CenterVertically,
-                                                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+
+
+                                                items(
+                                                    items = turns,
+                                                    key = { it.id }
+                                                ) { turn ->
+                                                    Column(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                                    ) {
+                                                        // 1. User Message (top-right pill bubble)
+                                                        if (turn.userEntry != null) {
+                                                            TranscriptEntryItem(
+                                                                entry = turn.userEntry,
+                                                                activeProviderLabel = activeProviderBadge,
+                                                                activeModelId = selectedModelId,
+                                                                isDarkTheme = isDarkTheme,
+                                                                feedbackState = messageFeedback[turn.userEntry.id],
+                                                                onApproveCommand = { viewModel.resolveCommandPermission(it, true) },
+                                                                onDenyCommand = { viewModel.resolveCommandPermission(it, false) },
+                                                                onAnalyzeWithGemini = { viewModel.analyzeEntryWithGemini(it) },
+                                                                onSwitchToTerminal = { viewMode = NexusViewMode.TERMINAL },
+                                                                onRegenerate = { viewModel.regenerateFromEntry(it) },
+                                                                onEditAndResubmit = { targetEntry, editedText ->
+                                                                    viewModel.editAndResubmitPrompt(targetEntry, editedText)
+                                                                }
+                                                            )
+                                                        }
+
+                                                        // 2. Assistant Turn Timeline Blocks (Thought Process, Tool Group, Text, Approvals, Notices)
+                                                        val timelineBlocks = remember(turn.assistantEntries, turn.isLiveTurn, streamingText) {
+                                                            TurnTimelineBuilder.build(
+                                                                entries = turn.assistantEntries,
+                                                                activeStreamingText = if (turn.isLiveTurn) streamingText.orEmpty() else "",
+                                                                isTurnActive = turn.isLiveTurn
+                                                            )
+                                                        }
+
+                                                        timelineBlocks.forEach { block ->
+                                                            when (block) {
+                                                                is TimelineBlock.ThinkingBlock -> {
+                                                                    ThinkingRow(
+                                                                        thinkingBlock = block,
+                                                                        visibilityPreference = personalizationConfig.thoughtProcessVisibility
+                                                                    )
+                                                                }
+                                                                is TimelineBlock.TextBlock -> {
+                                                                    MarkdownMessageContent(
+                                                                        markdown = block.markdownText,
+                                                                        isStreaming = turn.isLiveTurn && block.blockId == "live_text"
+                                                                    )
+                                                                }
+                                                                is TimelineBlock.ToolGroup -> {
+                                                                    ToolGroupRow(
+                                                                        toolGroup = block,
+                                                                        expandMode = personalizationConfig.toolGroupExpandMode,
+                                                                        onAuditCommand = { cmd ->
+                                                                            turn.assistantEntries.firstOrNull { it.command == cmd }?.let {
+                                                                                viewModel.analyzeEntryWithGemini(it)
+                                                                            }
+                                                                        },
+                                                                        onExplainOutput = { cmd ->
+                                                                            turn.assistantEntries.firstOrNull { it.command == cmd }?.let {
+                                                                                viewModel.analyzeEntryWithGemini(it)
+                                                                            }
+                                                                        },
+                                                                        onOpenInTerminal = { viewMode = NexusViewMode.TERMINAL }
+                                                                    )
+                                                                }
+                                                                is TimelineBlock.ApprovalBlock -> {
+                                                                    TranscriptEntryItem(
+                                                                        entry = block.commandEntry,
+                                                                        activeProviderLabel = activeProviderBadge,
+                                                                        activeModelId = selectedModelId,
+                                                                        isDarkTheme = isDarkTheme,
+                                                                        onApproveCommand = { viewModel.resolveCommandPermission(it, true) },
+                                                                        onDenyCommand = { viewModel.resolveCommandPermission(it, false) },
+                                                                        onAnalyzeWithGemini = { viewModel.analyzeEntryWithGemini(it) },
+                                                                        onSwitchToTerminal = { viewMode = NexusViewMode.TERMINAL }
+                                                                    )
+                                                                }
+                                                                is TimelineBlock.NoticeBlock -> {
+                                                                    TranscriptEntryItem(
+                                                                        entry = block.noticeEntry,
+                                                                        activeProviderLabel = activeProviderBadge,
+                                                                        activeModelId = selectedModelId,
+                                                                        isDarkTheme = isDarkTheme,
+                                                                        onApproveCommand = { viewModel.resolveCommandPermission(it, true) },
+                                                                        onDenyCommand = { viewModel.resolveCommandPermission(it, false) },
+                                                                        onAnalyzeWithGemini = { viewModel.analyzeEntryWithGemini(it) },
+                                                                        onSwitchToTerminal = { viewMode = NexusViewMode.TERMINAL },
+                                                                        onRetryAction = { viewModel.retryLastFailedAction() },
+                                                                        onGrantFileAccess = requestAllFilesAccess,
+                                                                        onRequestSignIn = triggerGuestSignInUpgrade,
+                                                                        onOpenEnvironmentSetup = {
+                                                                            viewModel.refreshExecutionEnvironment()
+                                                                            viewModel.runDiagnostics()
+                                                                            showEnvironmentSetupScreen = true
+                                                                        },
+                                                                        onFallbackLimitedShell = { cmd -> viewModel.executeFallbackInLimitedShell(cmd) },
+                                                                        onRerunAsBackgroundJob = { cmd -> viewModel.startBackgroundJob(cmd) },
+                                                                        onConfirmProjectSlug = { slug, bindExisting -> viewModel.confirmPendingProjectProposal(slug, bindExisting) }
+                                                                    )
+                                                                }
+                                                                is TimelineBlock.ErrorBlock -> {
+                                                                    Surface(
+                                                                        shape = RoundedCornerShape(10.dp),
+                                                                        color = NexusDanger.copy(alpha = 0.08f),
+                                                                        border = BorderStroke(1.dp, NexusDanger.copy(alpha = 0.35f)),
+                                                                        modifier = Modifier.fillMaxWidth()
                                                                     ) {
-                                                                        Icon(
-                                                                            imageVector = Icons.Default.Terminal,
-                                                                            contentDescription = "Track in Terminal",
-                                                                            tint = NexusAccent,
-                                                                            modifier = Modifier.size(12.dp)
-                                                                        )
-                                                                        Text(
-                                                                            text = "Track in Terminal",
-                                                                            style = MaterialTheme.typography.labelSmall,
-                                                                            color = MaterialTheme.colorScheme.onSurface
-                                                                        )
+                                                                        Column(
+                                                                            modifier = Modifier.padding(12.dp),
+                                                                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                                                                        ) {
+                                                                            Text(
+                                                                                text = block.title,
+                                                                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                                                                color = NexusDanger
+                                                                            )
+                                                                            Text(
+                                                                                text = block.message,
+                                                                                style = MaterialTheme.typography.bodySmall,
+                                                                                color = MaterialTheme.colorScheme.onSurface
+                                                                            )
+                                                                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                                                Button(
+                                                                                    onClick = { viewModel.retryLastFailedAction() },
+                                                                                    colors = ButtonDefaults.buttonColors(containerColor = NexusDanger)
+                                                                                ) {
+                                                                                    Text("Retry", color = Color.White)
+                                                                                }
+                                                                                OutlinedButton(
+                                                                                    onClick = { viewModel.createNewSession() }
+                                                                                ) {
+                                                                                    Text("New chat")
+                                                                                }
+                                                                            }
+                                                                        }
                                                                     }
                                                                 }
                                                             }
+                                                        }
 
-                                                            MarkdownMessageContent(
-                                                                markdown = streamingText!!.ifBlank { "Thinking…" },
-                                                                isStreaming = true
+                                                        // 3. Animated Working Indicator while live turn has no visible text streaming yet
+                                                        if (turn.isLiveTurn && streamingText.isNullOrBlank()) {
+                                                            AgentWorkingIndicator(
+                                                                isLoadingModel = (effectiveAgentStatus as? AgentStatus.Working)?.phase == AgentPhase.LOADING_MODEL
                                                             )
                                                         }
                                                     }
@@ -1470,7 +1565,7 @@ fun NexusMainScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
-                                StatusDotIndicator(status = effectiveStatus)
+                                StatusDotIndicator(agentStatus = effectiveAgentStatus)
                                 Icon(
                                     imageVector = Icons.Default.Terminal,
                                     contentDescription = "Track in Terminal",
@@ -1985,12 +2080,49 @@ fun NexusMainScreen(
             onDismiss = { previewPort = null }
         )
     }
+
+    if (showGuestChatLimitDialog) {
+        AlertDialog(
+            onDismissRequest = { viewModel.dismissGuestChatLimitDialog() },
+            containerColor = MaterialTheme.colorScheme.surface,
+            title = {
+                Text(
+                    text = "Guest mode limit",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            },
+            text = {
+                Text(
+                    text = "Guest mode supports 1 active chat session. Sign in with Google to create unlimited chats, sync across devices, and keep your history.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.dismissGuestChatLimitDialog()
+                        triggerGuestSignInUpgrade()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = NexusAccent)
+                ) {
+                    Text("Sign in with Google", color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { viewModel.dismissGuestChatLimitDialog() }) {
+                    Text("Cancel", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        )
+    }
 }
 
 /**
  * 1) SINGLE-ROW TOP BAR (never wraps)
- * - Left: Hamburger icon (opens sidebar)
- * - Center: Tappable status pill showing StatusDot + "Guest · Sign in" or "Free plan · Upgrade"
+ * - Left: Drawer toggle + New Chat icon
+ * - Center: High-visibility AgentStatus center pill (Ready / Thinking / Writing / Running command / Error)
  * - Right: Temporary Chat toggle icon (incognito style)
  */
 @Composable
@@ -1998,11 +2130,12 @@ private fun NexusEditorialTopBar(
     isPermanentRail: Boolean,
     isGuestMode: Boolean,
     isTemporaryChat: Boolean,
-    status: String,
+    status: AgentStatus,
     hasPendingBadge: Boolean,
     userFirstName: String?,
     viewMode: NexusViewMode,
     onOpenDrawer: () -> Unit,
+    onNewChatClick: () -> Unit = {},
     onCenterPillClick: () -> Unit,
     onToggleTemporaryChat: () -> Unit,
     onSwitchBackToChat: () -> Unit,
@@ -2028,10 +2161,10 @@ private fun NexusEditorialTopBar(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        // Left: Hamburger button (or view mode indicator on permanent rail)
-        Box(
-            modifier = Modifier.size(48.dp),
-            contentAlignment = Alignment.CenterStart
+        // Left: Hamburger button + New Chat button
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             if (!isPermanentRail) {
                 Surface(
@@ -2062,6 +2195,25 @@ private fun NexusEditorialTopBar(
                         }
                     }
                 }
+
+                Surface(
+                    onClick = onNewChatClick,
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    modifier = Modifier
+                        .size(40.dp)
+                        .testTag("top_bar_new_chat_button")
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            imageVector = Icons.Default.Edit,
+                            contentDescription = "New chat",
+                            tint = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                }
             } else if (viewMode != NexusViewMode.CHAT) {
                 Surface(
                     onClick = onSwitchBackToChat,
@@ -2086,7 +2238,7 @@ private fun NexusEditorialTopBar(
             }
         }
 
-        // Center: Tappable status & plan pill with status dot
+        // Center: High-visibility AgentStatus center pill
         Surface(
             onClick = onCenterPillClick,
             shape = RoundedCornerShape(12.dp),
@@ -2103,38 +2255,15 @@ private fun NexusEditorialTopBar(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                StatusDotIndicator(status = status)
-
-                val pillAnnotated = buildAnnotatedString {
-                    if (isGuestMode) {
-                        append("Guest · ")
-                        withStyle(
-                            SpanStyle(
-                                fontWeight = FontWeight.SemiBold,
-                                textDecoration = TextDecoration.Underline,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        ) {
-                            append("Sign in")
-                        }
-                    } else {
-                        append("Free plan · ")
-                        withStyle(
-                            SpanStyle(
-                                fontWeight = FontWeight.SemiBold,
-                                textDecoration = TextDecoration.Underline,
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                        ) {
-                            append(userFirstName ?: "Upgrade")
-                        }
-                    }
-                }
+                StatusDotIndicator(agentStatus = status)
 
                 Text(
-                    text = pillAnnotated,
-                    style = MaterialTheme.typography.labelMedium.copy(fontSize = 13.sp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = status.label,
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )

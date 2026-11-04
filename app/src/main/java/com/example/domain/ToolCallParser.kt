@@ -20,15 +20,17 @@ enum class CommandRiskLevel {
 enum class ToolActionKind {
     SHELL,
     START_JOB,
+    WAIT_FOR_JOB,
     JOB_STATUS,
     JOB_LOGS,
-    STOP_JOB
+    STOP_JOB,
+    WRITE_FILE
 }
 
 /**
  * Normalized provider-independent tool call model.
- * Both fenced blocks (`sh-exec` / `bash` / `sh` / `shell` / JSON fallback) and cloud native function calls
- * normalize into this single [ToolCall] model.
+ * Both fenced blocks (`sh-exec` / `bash` / `sh` / `shell` / JSON fallback), `<nexus:file>` blocks,
+ * and cloud native function calls normalize into this single [ToolCall] model.
  */
 data class ToolCall(
     val command: String,
@@ -44,7 +46,12 @@ data class ToolCall(
     },
     val jobId: String = "",
     val logLinesCount: Int = 50,
-    val runsInBackground: Boolean = actionKind == ToolActionKind.START_JOB || ServerLogAnalyzer.shouldRunAsBackgroundJob(command)
+    val runsInBackground: Boolean = actionKind == ToolActionKind.START_JOB || ServerLogAnalyzer.shouldRunAsBackgroundJob(command),
+    val explicitTitle: String? = null,
+    val targetFilePath: String? = null,
+    val targetFileContent: String? = null,
+    val executionPolicy: CommandExecutionPolicy = CommandExecutionPolicy.detectPolicy(command),
+    val waitMaxSeconds: Long = 120L
 )
 
 sealed interface ToolCallParseResult {
@@ -99,7 +106,12 @@ plain-text ::= ([^`] | "`" [^`] | "``" [^`])+
     )
 
     private val FENCED_TOOL_REGEX = Regex(
-        pattern = "```(sh-exec|bash|sh|shell)\\s*\\r?\\n([\\s\\S]*?)```",
+        pattern = "```(sh-exec|bash|sh|shell)(?:\\s+title=\"([^\"]*)\")?\\s*\\r?\\n([\\s\\S]*?)```",
+        option = RegexOption.IGNORE_CASE
+    )
+
+    private val NEXUS_FILE_TAG_REGEX = Regex(
+        pattern = "<nexus:file\\s+path=\"([^\"]+)\"(?:\\s+title=\"([^\"]*)\")?>([\\s\\S]*?)</nexus:file>",
         option = RegexOption.IGNORE_CASE
     )
 
@@ -119,11 +131,16 @@ plain-text ::= ([^`] | "`" [^`] | "``" [^`])+
 
     // Function-like or CLI-style job syntax inside sh-exec blocks:
     // start_job("npm run dev") or start_job npm run dev
+    // wait_for_job("job_123", 30) or wait_for_job job_123 30
     // job_status("job_123") or job_status job_123
     // job_logs("job_123", 50) or job_logs job_123 50
     // stop_job("job_123") or stop_job job_123
     private val START_JOB_CALL_REGEX = Regex(
         """^\s*start_job\s*(?:\(\s*["']?(.+?)["']?\s*\)|\s+(.+))\s*$""",
+        RegexOption.IGNORE_CASE
+    )
+    private val WAIT_FOR_JOB_CALL_REGEX = Regex(
+        """^\s*wait_for_job\s*(?:\(\s*["']?([a-zA-Z0-9_.-]+)["']?(?:\s*,\s*(\d+))?\s*\)|\s+([a-zA-Z0-9_.-]+)(?:\s+(\d+))?)\s*$""",
         RegexOption.IGNORE_CASE
     )
     private val JOB_STATUS_CALL_REGEX = Regex(
@@ -459,17 +476,17 @@ plain-text ::= ([^`] | "`" [^`] | "``" [^`])+
     fun formatNormalizedToolCallBlock(toolCall: ToolCall, explanation: String = ""): String {
         val prefix = explanation.trim().let { if (it.isNotEmpty()) "$it\n\n" else "" }
         val blockBody = when (toolCall.actionKind) {
-            ToolActionKind.START_JOB -> "start_job ${toolCall.command.trim()}"
-            ToolActionKind.JOB_STATUS -> "job_status ${toolCall.jobId.trim()}"
-            ToolActionKind.JOB_LOGS -> "job_logs ${toolCall.jobId.trim()} ${toolCall.logLinesCount}"
-            ToolActionKind.STOP_JOB -> "stop_job ${toolCall.jobId.trim()}"
-            ToolActionKind.SHELL -> toolCall.command.trim()
+            ToolActionKind.START_JOB -> "```sh-exec\nstart_job ${toolCall.command.trim()}\n```"
+            ToolActionKind.WAIT_FOR_JOB -> "```sh-exec\nwait_for_job ${toolCall.jobId.trim()} ${toolCall.waitMaxSeconds}\n```"
+            ToolActionKind.JOB_STATUS -> "```sh-exec\njob_status ${toolCall.jobId.trim()}\n```"
+            ToolActionKind.JOB_LOGS -> "```sh-exec\njob_logs ${toolCall.jobId.trim()} ${toolCall.logLinesCount}\n```"
+            ToolActionKind.STOP_JOB -> "```sh-exec\nstop_job ${toolCall.jobId.trim()}\n```"
+            ToolActionKind.WRITE_FILE -> "<nexus:file path=\"${toolCall.targetFilePath.orEmpty()}\">\n${toolCall.targetFileContent.orEmpty()}\n</nexus:file>"
+            ToolActionKind.SHELL -> "```sh-exec\n${toolCall.command.trim()}\n```"
         }
         return buildString {
             append(prefix)
-            append("```sh-exec\n")
             append(blockBody)
-            append("\n```")
         }
     }
 
@@ -481,7 +498,8 @@ plain-text ::= ([^`] | "`" [^`] | "``" [^`])+
         source: String,
         defaultTimeoutSec: Long = 10L,
         reasonOverride: String? = null,
-        approvedMultiLine: Boolean = false
+        approvedMultiLine: Boolean = false,
+        explicitTitle: String? = null
     ): ToolCall {
         val trimmed = rawCommand.trim()
 
@@ -510,6 +528,23 @@ plain-text ::= ([^`] | "`" [^`] | "``" [^`])+
                 riskLevel = CommandRiskLevel.LOW,
                 actionKind = ToolActionKind.JOB_STATUS,
                 jobId = jobId,
+                runsInBackground = false
+            )
+        }
+
+        WAIT_FOR_JOB_CALL_REGEX.find(trimmed)?.let { m ->
+            val jobId = (m.groupValues[1].ifBlank { m.groupValues[3] }).trim()
+            val secStr = m.groupValues[2].ifBlank { m.groupValues[4] }
+            val waitSec = secStr.toLongOrNull()?.coerceIn(1L, 120L) ?: 30L
+            return ToolCall(
+                command = "wait_for_job $jobId $waitSec",
+                reason = reasonOverride ?: "Wait up to ${waitSec}s for background job $jobId",
+                timeoutSec = waitSec + 5L,
+                source = source,
+                riskLevel = CommandRiskLevel.LOW,
+                actionKind = ToolActionKind.WAIT_FOR_JOB,
+                jobId = jobId,
+                waitMaxSeconds = waitSec,
                 runsInBackground = false
             )
         }
@@ -559,7 +594,8 @@ plain-text ::= ([^`] | "`" [^`] | "``" [^`])+
             riskLevel = risk,
             approvedMultiLine = approvedMultiLine,
             actionKind = if (autoBackground) ToolActionKind.START_JOB else ToolActionKind.SHELL,
-            runsInBackground = autoBackground
+            runsInBackground = autoBackground,
+            explicitTitle = explicitTitle
         )
     }
 
@@ -574,6 +610,37 @@ plain-text ::= ([^`] | "`" [^`] | "``" [^`])+
         val trimmedText = ThinkingTagParser.stripThinkingForHistoryAndTools(rawText).trim()
         if (trimmedText.isEmpty()) {
             return ToolCallParseResult.NoToolCall
+        }
+
+        // 0. Check `<nexus:file path="..." title="...">...</nexus:file>` tags
+        val fileTagMatches = NEXUS_FILE_TAG_REGEX.findAll(trimmedText).toList()
+        if (fileTagMatches.isNotEmpty()) {
+            if (fileTagMatches.size > 1) {
+                return ToolCallParseResult.ParseError(
+                    message = "Multiple file creation blocks emitted in a single step; max 1 file operation per step is permitted.",
+                    rawSnippet = fileTagMatches.first().value.take(160)
+                )
+            }
+            val match = fileTagMatches.first()
+            val path = match.groupValues[1].trim()
+            val titleAttr = match.groupValues[2].takeIf { it.isNotBlank() }
+            val fileContent = match.groupValues[3]
+            val cleaned = trimmedText.replace(match.value, "").trim()
+            val safePath = path.replace("'", "'\\''")
+            val catCommand = "cat << 'EOF' > '$safePath'\n$fileContent\nEOF"
+            val tc = ToolCall(
+                command = catCommand,
+                reason = "Create or update file $path",
+                timeoutSec = defaultTimeoutSec,
+                source = "nexus:file",
+                riskLevel = classifyRisk(catCommand),
+                approvedMultiLine = true,
+                actionKind = ToolActionKind.WRITE_FILE,
+                explicitTitle = titleAttr ?: "Create ${java.io.File(path).name.ifBlank { path }}",
+                targetFilePath = path,
+                targetFileContent = fileContent
+            )
+            return ToolCallParseResult.Success(tc, cleaned)
         }
 
         // 1. Check `<nexus_tool>...</nexus_tool>` tags first
@@ -629,7 +696,8 @@ plain-text ::= ([^`] | "`" [^`] | "``" [^`])+
 
             val chosenMatch = shExecMatches.firstOrNull() ?: fenceMatches.first()
             val fenceLang = chosenMatch.groupValues[1].lowercase()
-            val rawCommandBody = chosenMatch.groupValues[2]
+            val explicitTitle = chosenMatch.groupValues[2].takeIf { it.isNotBlank() }
+            val rawCommandBody = chosenMatch.groupValues[3]
 
             val strippedBody = rawCommandBody
                 .trim('\r', '\n', ' ', '\t')
@@ -672,11 +740,13 @@ plain-text ::= ([^`] | "`" [^`] | "``" [^`])+
                 rawCommand = finalCommand,
                 source = fenceLang,
                 defaultTimeoutSec = defaultTimeoutSec,
-                approvedMultiLine = allowMultiLineIfApproved && hasUnescapedNewlines(strippedBody)
+                approvedMultiLine = allowMultiLineIfApproved && hasUnescapedNewlines(strippedBody),
+                explicitTitle = explicitTitle
             )
+            val cleaned = trimmedText.replace(chosenMatch.value, "").trim()
             return ToolCallParseResult.Success(
                 toolCall = toolCall,
-                cleanedAssistantText = trimmedText
+                cleanedAssistantText = cleaned
             )
         }
 

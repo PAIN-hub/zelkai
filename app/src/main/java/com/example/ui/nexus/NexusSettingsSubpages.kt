@@ -2230,6 +2230,81 @@ fun AboutSettingsSubpage(
             }
         }
 
+        // Auth Diagnostics Card (Debug & Troubleshooting)
+        val authRecords = remember { com.example.domain.AuthDiagnostics.getRecords() }
+        if (BuildConfig.DEBUG || authRecords.isNotEmpty()) {
+            val context = LocalContext.current
+            var copiedNotification by remember { mutableStateOf(false) }
+
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                modifier = Modifier.fillMaxWidth().testTag("auth_diagnostics_card")
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Text(
+                        text = "Authentication Diagnostics (Debug)",
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Real-time verification of Google Credential Manager, Firebase Auth, and Firestore bootstrap steps (all credentials redacted):",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    com.example.domain.AuthStep.entries.forEach { step ->
+                        val rec = authRecords.find { it.step == step }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = step.label,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            val statusText = when {
+                                rec == null -> "NOT_RUN"
+                                rec.isSuccess -> "PASS"
+                                else -> "FAIL (${rec.exceptionCode ?: rec.exceptionClass ?: "error"})"
+                            }
+                            val statusColor = when {
+                                rec == null -> MaterialTheme.colorScheme.onSurfaceVariant
+                                rec.isSuccess -> NexusOk
+                                else -> NexusDanger
+                            }
+                            Text(
+                                text = statusText,
+                                style = MaterialTheme.typography.labelSmall.copy(fontFamily = JetBrainsMonoFontFamily, fontWeight = FontWeight.SemiBold),
+                                color = statusColor
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = {
+                            val cm = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE) as? android.content.ClipboardManager
+                            val clip = android.content.ClipData.newPlainText("Nexus Auth Diagnostics", com.example.domain.AuthDiagnostics.exportRedactedSummary())
+                            cm?.setPrimaryClip(clip)
+                            copiedNotification = true
+                        },
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.fillMaxWidth().testTag("copy_auth_diagnostics_button")
+                    ) {
+                        Icon(imageVector = Icons.Default.Info, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(if (copiedNotification) "Copied to clipboard!" else "Copy diagnostics report")
+                    }
+                }
+            }
+        }
+
         // Legal & Privacy Links
         Surface(
             shape = RoundedCornerShape(18.dp),

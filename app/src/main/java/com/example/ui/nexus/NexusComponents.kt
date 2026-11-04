@@ -106,6 +106,8 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.model.TranscriptEntry
+import com.example.domain.AgentPhase
+import com.example.domain.AgentStatus
 import com.example.domain.ModelLoadResult
 import com.example.domain.NexusToolAndRedactor
 import com.example.ui.theme.JetBrainsMonoFontFamily
@@ -129,6 +131,65 @@ import androidx.compose.runtime.withFrameNanos
 
 /**
  * Small status dot for the Top Bar pill (ready / streaming / awaiting approval / executing).
+ */
+@Composable
+fun StatusDotIndicator(
+    agentStatus: AgentStatus,
+    modifier: Modifier = Modifier
+) {
+    val dotColor: Color
+    val isPulsing: Boolean
+    when (agentStatus) {
+        is AgentStatus.Idle -> {
+            dotColor = NexusOk
+            isPulsing = false
+        }
+        is AgentStatus.Working -> {
+            isPulsing = true
+            dotColor = when (agentStatus.phase) {
+                AgentPhase.THINKING, AgentPhase.WRITING -> NexusAccent
+                AgentPhase.WAITING_FOR_APPROVAL -> NexusWarn
+                AgentPhase.RUNNING_COMMAND, AgentPhase.WAITING_FOR_JOB -> NexusAccent2
+                AgentPhase.LOADING_MODEL -> NexusAccent
+            }
+        }
+        is AgentStatus.Error -> {
+            dotColor = NexusDanger
+            isPulsing = false
+        }
+    }
+    val transition = rememberInfiniteTransition(label = "topBarDotPulse")
+    val pulseScale by transition.animateFloat(
+        initialValue = 1f,
+        targetValue = if (isPulsing) 0.72f else 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(750),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulseScale"
+    )
+    val pulseAlpha by transition.animateFloat(
+        initialValue = 1f,
+        targetValue = if (isPulsing) 0.42f else 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(750),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulseAlpha"
+    )
+
+    Box(
+        modifier = modifier
+            .size(7.dp)
+            .scale(pulseScale)
+            .alpha(pulseAlpha)
+            .clip(CircleShape)
+            .background(dotColor)
+    )
+}
+
+/**
+ * Small status dot for the Top Bar pill (legacy string status).
  */
 @Composable
 fun StatusDotIndicator(

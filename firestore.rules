@@ -1,3 +1,64 @@
+// ===============================================================
+// Assumed Data Model
+// ===============================================================
+//
+// Collection: users/{userId} (NexusUserSettings)
+// Fields:
+//   - userId: string (required, immutable, matches auth.uid)
+//   - provider: string (required, in ['gemini', 'anthropic', 'openai', 'fable', 'local'])
+//   - selectedModel: string (required, 1..120 chars)
+//   - maxTokens: int (required, 256..64000)
+//   - maxSteps: int (required, 1..12)
+//   - timeoutSec: int (required, 1..120)
+//   - agentPersona: string (required, 1..2000 chars)
+//   - activeSessionId: string (required, <= 128 chars)
+//   - inputHistory: list<string> (required, <= 100 items)
+//   - displayName, avatarDataUri, fontSize, responseStyle, personaPreset,
+//     customPersonasJson, aboutUser, responsePreference, enableForNewChats,
+//     skillsJson, skillsTokenBudget, recentWorkspaces: optional profile/personalization fields
+//   - createdAt: timestamp (required, immutable, <= request.time)
+//   - updatedAt: timestamp (required, <= request.time)
+//
+// Collection: users/{userId}/sessions/{sessionId} (NexusSession)
+// Fields:
+//   - userId: string (required, immutable, matches auth.uid)
+//   - title: string (required, 1..120 chars)
+//   - status: string (required, in ['idle', 'stream', 'wait', 'exec'])
+//   - cwd: string (required, 1..512 chars)
+//   - commandsCount: int (required, 0..100000)
+//   - redactionsCount: int (required, 0..100000)
+//   - provider: string (required, 1..40 chars)
+//   - model: string (required, 1..120 chars)
+//   - projectSlug: string (optional, <= 64 chars, slug pattern)
+//   - storageLocation: string (optional, in ['shared_storage', 'termux_home_mirrored', 'temp_scratch'])
+//   - createdAt: timestamp (required, immutable, <= request.time)
+//   - updatedAt: timestamp (required, <= request.time)
+//
+// Collection: users/{userId}/sessions/{sessionId}/entries/{entryId} (TranscriptEntry)
+// Fields:
+//   - userId: string (required, immutable, matches auth.uid)
+//   - sessionId: string (required, immutable, matches sessionId)
+//   - type: string (required, immutable, in ['user', 'agent', 'command', 'output', 'notice', 'analysis'])
+//   - text: string (required, <= 32000 chars)
+//   - command: string (required, <= 4000 chars)
+//   - reason: string (required, <= 1000 chars)
+//   - commandStatus: string (required, in ['', 'pending', 'approved', 'denied', 'cancelled'])
+//   - isRisky: bool (required)
+//   - timeoutSec: int (required, 0..600)
+//   - cwd: string (required, <= 512 chars)
+//   - exitCode: int (required, -999..999)
+//   - output: string (required, <= 32000 chars)
+//   - redactions: int (required, 0..100000)
+//   - noticeKind: string (required, <= 64 chars)
+//   - sequence: int (required, immutable, 0..1000000)
+//   - title: string (optional, <= 120 chars) - sanitized plain-language step title
+//   - reasoningText: string (optional, <= 10000 chars) - redacted reasoning trace
+//   - thinkingDurationSec: int (optional, 0..86400) - thinking duration in seconds
+//   - jobId: string (optional, <= 128 chars) - background job identifier
+//   - createdAt: timestamp (required, immutable, <= request.time)
+//   - updatedAt: timestamp (required, <= request.time)
+// ===============================================================
+
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -11,6 +72,10 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -21,6 +86,10 @@ service cloud.firestore {
 
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOptionalString(data, field, maxLen) {
+      return !(field in data) || (data[field] is string && data[field].size() <= maxLen);
     }
 
     // Validation Helper 1: NexusUserSettings
@@ -68,32 +137,39 @@ service cloud.firestore {
     }
 
     // Validation Helper 3: TranscriptEntry
-    function isValidTranscriptEntry(data, sessionId) {
-      return data.userId is string && data.userId == request.auth.uid &&
+    function isValidEntry(data, userId, sessionId) {
+      return data.userId is string && data.userId == userId && data.userId == request.auth.uid &&
              data.sessionId is string && data.sessionId == sessionId &&
              data.type is string && data.type in ['user', 'agent', 'command', 'output', 'notice', 'analysis'] &&
-             data.text is string && data.text.size() <= 20000 &&
-             data.command is string && data.command.size() <= 2000 &&
-             data.reason is string && data.reason.size() <= 1000 &&
+             isOptionalString(data, 'text', 32000) &&
+             isOptionalString(data, 'command', 4000) &&
+             isOptionalString(data, 'reason', 1000) &&
              data.commandStatus is string && data.commandStatus in ['', 'pending', 'approved', 'denied', 'cancelled'] &&
              data.isRisky is bool &&
              data.timeoutSec is int && data.timeoutSec >= 0 && data.timeoutSec <= 600 &&
-             data.cwd is string && data.cwd.size() <= 512 &&
+             isOptionalString(data, 'cwd', 512) &&
              data.exitCode is int && data.exitCode >= -999 && data.exitCode <= 999 &&
-             data.output is string && data.output.size() <= 20000 &&
+             isOptionalString(data, 'output', 32000) &&
              data.redactions is int && data.redactions >= 0 && data.redactions <= 100000 &&
-             data.noticeKind is string && data.noticeKind.size() <= 40 &&
+             isOptionalString(data, 'noticeKind', 64) &&
              data.sequence is int && data.sequence >= 0 && data.sequence <= 1000000 &&
+             isOptionalString(data, 'title', 120) &&
+             isOptionalString(data, 'reasoningText', 10000) &&
+             (!('thinkingDurationSec' in data) || (data.thinkingDurationSec is int && data.thinkingDurationSec >= 0 && data.thinkingDurationSec <= 86400)) &&
+             isOptionalString(data, 'jobId', 128) &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
     }
 
-    match /users/{userId} {
-      allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId);
-      allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+    function isValidTranscriptEntry(data, sessionId) {
+      return isValidEntry(data, request.auth.uid, sessionId);
+    }
 
-      allow create: if isSignedIn() &&
-                       request.auth.uid == userId &&
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if isOwner(userId) && existing().userId == request.auth.uid;
+
+      allow create: if isOwner(userId) &&
                        isValidId(userId) &&
                        incoming().keys().hasAll([
                          'userId', 'provider', 'selectedModel', 'maxTokens', 'maxSteps',
@@ -110,9 +186,8 @@ service cloud.firestore {
                        ]) &&
                        isValidNexusUserSettings(incoming());
 
-      allow update: if isSignedIn() &&
+      allow update: if isOwner(userId) &&
                        isValidNexusUserSettings(incoming()) &&
-                       request.auth.uid == userId &&
                        isValidId(userId) &&
                        incoming().userId == existing().userId &&
                        incoming().createdAt == existing().createdAt &&
@@ -125,14 +200,13 @@ service cloud.firestore {
                          'updatedAt'
                        ]);
 
-      allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId);
+      allow delete: if isOwner(userId) && isValidId(userId);
 
       match /sessions/{sessionId} {
-        allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(sessionId);
-        allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(sessionId);
+        allow list: if isOwner(userId) && existing().userId == request.auth.uid;
 
-        allow create: if isSignedIn() &&
-                         request.auth.uid == userId &&
+        allow create: if isOwner(userId) &&
                          isValidId(userId) &&
                          isValidId(sessionId) &&
                          incoming().keys().hasAll([
@@ -146,9 +220,8 @@ service cloud.firestore {
                          ]) &&
                          isValidNexusSession(incoming());
 
-        allow update: if isSignedIn() &&
+        allow update: if isOwner(userId) &&
                          isValidNexusSession(incoming()) &&
-                         request.auth.uid == userId &&
                          isValidId(userId) &&
                          isValidId(sessionId) &&
                          incoming().userId == existing().userId &&
@@ -159,14 +232,13 @@ service cloud.firestore {
                            'updatedAt'
                          ]);
 
-        allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(sessionId);
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(sessionId);
 
         match /entries/{entryId} {
-          allow get: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(sessionId) && isValidId(entryId);
-          allow list: if isSignedIn() && request.auth.uid == userId && existing().userId == request.auth.uid;
+          allow get: if isOwner(userId) && isValidId(userId) && isValidId(sessionId) && isValidId(entryId);
+          allow list: if isOwner(userId) && existing().userId == request.auth.uid;
 
-          allow create: if isSignedIn() &&
-                           request.auth.uid == userId &&
+          allow create: if isOwner(userId) &&
                            isValidId(userId) &&
                            isValidId(sessionId) &&
                            isValidId(entryId) &&
@@ -178,13 +250,14 @@ service cloud.firestore {
                            incoming().keys().hasOnly([
                              'userId', 'sessionId', 'type', 'text', 'command', 'reason',
                              'commandStatus', 'isRisky', 'timeoutSec', 'cwd', 'exitCode',
-                             'output', 'redactions', 'noticeKind', 'sequence', 'createdAt', 'updatedAt'
+                             'output', 'redactions', 'noticeKind', 'sequence',
+                             'title', 'reasoningText', 'thinkingDurationSec', 'jobId',
+                             'createdAt', 'updatedAt'
                            ]) &&
-                           isValidTranscriptEntry(incoming(), sessionId);
+                           isValidEntry(incoming(), userId, sessionId);
 
-          allow update: if isSignedIn() &&
-                           isValidTranscriptEntry(incoming(), sessionId) &&
-                           request.auth.uid == userId &&
+          allow update: if isOwner(userId) &&
+                           isValidEntry(incoming(), userId, sessionId) &&
                            isValidId(userId) &&
                            isValidId(sessionId) &&
                            isValidId(entryId) &&
@@ -194,10 +267,11 @@ service cloud.firestore {
                            incoming().sequence == existing().sequence &&
                            incoming().createdAt == existing().createdAt &&
                            incoming().diff(existing()).affectedKeys().hasOnly([
-                             'text', 'commandStatus', 'cwd', 'exitCode', 'output', 'redactions', 'updatedAt'
+                             'text', 'commandStatus', 'cwd', 'exitCode', 'output', 'redactions',
+                             'title', 'reasoningText', 'thinkingDurationSec', 'jobId', 'updatedAt'
                            ]);
 
-          allow delete: if isSignedIn() && request.auth.uid == userId && isValidId(userId) && isValidId(sessionId) && isValidId(entryId);
+          allow delete: if isOwner(userId) && isValidId(userId) && isValidId(sessionId) && isValidId(entryId);
         }
       }
     }

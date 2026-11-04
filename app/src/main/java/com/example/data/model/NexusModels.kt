@@ -94,6 +94,10 @@ data class TranscriptEntry(
     val redactions: Long = 0L,
     val noticeKind: String = "", // warn, error, info
     val sequence: Long = 0L,
+    val title: String = "",
+    val reasoningText: String = "",
+    val thinkingDurationSec: Long = 0L,
+    val jobId: String = "",
     @ServerTimestamp val createdAt: Timestamp? = null,
     @ServerTimestamp val updatedAt: Timestamp? = null
 )

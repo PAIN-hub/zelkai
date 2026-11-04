@@ -1,6 +1,8 @@
 package com.example.ui.auth
 
 import android.app.Activity
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -318,6 +320,7 @@ fun AuthScreen(
 
         stage = AuthStage.OPENING_GOOGLE
         errorMessage = null
+        com.example.domain.AuthDiagnostics.clear()
 
         val signInOption = GetSignInWithGoogleOption.Builder(serverClientId = clientId).build()
         val request = GetCredentialRequest.Builder().addCredentialOption(signInOption).build()
@@ -326,30 +329,55 @@ fun AuthScreen(
             try {
                 val activityContext = context as? Activity ?: context
                 val result = credentialManager.getCredential(activityContext, request)
+                com.example.domain.AuthDiagnostics.recordSuccess(com.example.domain.AuthStep.CREDENTIAL_REQUEST)
                 stage = AuthStage.SIGNING_IN
 
                 val credential = result.credential
                 if (credential is CustomCredential && credential.type == TYPE_GOOGLE_ID_TOKEN_CREDENTIAL) {
                     val googleIdToken = GoogleIdTokenCredential.createFrom(credential.data).idToken
+                    com.example.domain.AuthDiagnostics.recordSuccess(com.example.domain.AuthStep.ID_TOKEN_RECEIVED)
                     val authCredential = GoogleAuthProvider.getCredential(googleIdToken, null)
                     val authResult = Firebase.auth.signInWithCredential(authCredential).await()
+                    com.example.domain.AuthDiagnostics.recordSuccess(com.example.domain.AuthStep.FIREBASE_SIGN_IN)
                     val user = authResult.user
                     val name = user?.displayName?.split(" ")?.firstOrNull() ?: "there"
                     welcomeName = name
                     stage = AuthStage.WELCOME
+                    com.example.domain.AuthDiagnostics.recordSuccess(com.example.domain.AuthStep.POST_LOGIN_BOOTSTRAP)
                     delay(1000L)
+                    com.example.domain.AuthDiagnostics.recordSuccess(com.example.domain.AuthStep.NAVIGATION)
                     onAuthSuccess()
                 } else {
+                    val formatErr = "Unexpected credential format (${credential.javaClass.simpleName})"
+                    com.example.domain.AuthDiagnostics.recordFailure(
+                        com.example.domain.AuthStep.ID_TOKEN_RECEIVED,
+                        null,
+                        code = "INVALID_CREDENTIAL_TYPE",
+                        detail = formatErr
+                    )
                     errorMessage = "Unexpected credential format. Please try again."
                     stage = AuthStage.ERROR
                 }
             } catch (e: GetCredentialCancellationException) {
                 // User dismissed Google picker quietly
+                com.example.domain.AuthDiagnostics.recordFailure(
+                    com.example.domain.AuthStep.CREDENTIAL_REQUEST,
+                    e,
+                    code = "USER_CANCELLATION",
+                    detail = "User dismissed Google picker"
+                )
                 stage = AuthStage.IDLE
             } catch (e: Exception) {
                 if (BuildConfig.DEBUG) {
                     Log.w(TAG, "Google Sign-in failed: ${e.message}")
                 }
+                val step = if (stage == AuthStage.OPENING_GOOGLE) com.example.domain.AuthStep.CREDENTIAL_REQUEST else com.example.domain.AuthStep.FIREBASE_SIGN_IN
+                com.example.domain.AuthDiagnostics.recordFailure(
+                    step,
+                    e,
+                    code = (e as? com.google.firebase.auth.FirebaseAuthException)?.errorCode ?: e.javaClass.simpleName,
+                    detail = e.message
+                )
                 errorMessage = mapAuthError(e, BuildConfig.DEBUG)
                 stage = AuthStage.ERROR
             }
@@ -559,6 +587,13 @@ fun AuthScreen(
                             onAction = {
                                 stage = AuthStage.IDLE
                                 errorMessage = null
+                            },
+                            secondaryActionLabel = "Copy diagnostics",
+                            onSecondaryAction = {
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                val clip = ClipData.newPlainText("Nexus Auth Diagnostics", com.example.domain.AuthDiagnostics.exportRedactedSummary())
+                                cm?.setPrimaryClip(clip)
+                                statusNotification = "Diagnostics copied to clipboard (all secrets redacted)."
                             },
                             accentColor = NexusDanger
                         )

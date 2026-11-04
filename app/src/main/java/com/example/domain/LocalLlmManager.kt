@@ -296,6 +296,13 @@ class LocalLlmManager(private val context: Context) {
     val activePreset: StateFlow<InferencePreset> = inferenceOptimizer.activePreset
     val isBenchmarking: StateFlow<Boolean> = inferenceOptimizer.isBenchmarking
     val lastLoadGuardError: StateFlow<ModelLoadResult.RefusedByLoadGuard?> = inferenceOptimizer.lastLoadGuardError
+    val crashRecoveryNotice: StateFlow<CrashRecoveryNotice?> = inferenceOptimizer.crashRecoveryNotice
+    val unstableModelIds: StateFlow<Set<String>> = inferenceOptimizer.unstableModelIds
+
+    private val _showModelsAboveRecommendedSize = MutableStateFlow(
+        prefs.getBoolean("show_models_above_recommended_size", false)
+    )
+    val showModelsAboveRecommendedSize: StateFlow<Boolean> = _showModelsAboveRecommendedSize.asStateFlow()
 
     private val _engineInfo = MutableStateFlow(EngineProvider.engineInfo())
     val engineInfo: StateFlow<EngineInfo> = _engineInfo.asStateFlow()
@@ -472,10 +479,22 @@ class LocalLlmManager(private val context: Context) {
             catalog = ModelRegistry.loadModels(context),
             preset = inferenceOptimizer.activePreset.value,
             measuredBenchmarks = inferenceOptimizer.benchmarks.value,
-            downloadedModelIds = _downloadedModels.value
+            downloadedModelIds = _downloadedModels.value,
+            allowAboveRecommendedBudget = _showModelsAboveRecommendedSize.value,
+            unstableModelIds = inferenceOptimizer.unstableModelIds.value
         )
         _recommendationReport.value = report
         return report
+    }
+
+    fun setShowModelsAboveRecommendedSize(enabled: Boolean) {
+        _showModelsAboveRecommendedSize.value = enabled
+        prefs.edit().putBoolean("show_models_above_recommended_size", enabled).apply()
+        refreshDeviceProfileAndRecommendations(forceRebenchmark = false)
+    }
+
+    fun dismissCrashRecoveryNotice() {
+        inferenceOptimizer.dismissCrashRecoveryNotice()
     }
 
     fun setInferencePreset(preset: InferencePreset) {
@@ -498,13 +517,18 @@ class LocalLlmManager(private val context: Context) {
         return inferenceOptimizer.activeLoadedModel.value?.modelId.equals(modelId, ignoreCase = true)
     }
 
-    suspend fun switchActiveLocalModel(modelId: String, systemPromptPrefix: String = ""): ModelLoadResult {
+    suspend fun switchActiveLocalModel(
+        modelId: String,
+        systemPromptPrefix: String = "",
+        forceLoadDespiteWarning: Boolean = false
+    ): ModelLoadResult {
         isModelExplicitlyUnloaded = false
         val file = getModelFileOnDisk(modelId)
         val res = inferenceOptimizer.loadAndPrepareModel(
             modelId = modelId,
             systemPromptPrefix = systemPromptPrefix,
-            modelFile = file
+            modelFile = file,
+            forceLoadDespiteWarning = forceLoadDespiteWarning
         )
         refreshDeviceProfileAndRecommendations(forceRebenchmark = false)
         return res
@@ -695,21 +719,20 @@ class LocalLlmManager(private val context: Context) {
         val requiredStorageBytes = (spec.sizeBytes * 1.10).toLong()
         val storagePassed = profile.freeStorageBytes >= requiredStorageBytes
         val apiPassed = profile.apiLevel >= entry.minApiLevel
-        val ramCapable = profile.availableRamBytes >= entry.ramRequiredBytes &&
-            entry.ramRequiredBytes <= (profile.totalRamBytes * 0.82).toLong()
-        val ramMarginal = !ramCapable &&
-            profile.totalRamGb >= spec.minRamGb &&
-            profile.availableRamGb >= (spec.minRamGb * 0.72)
+        val footprintBytes = RamPolicy.estimateModelFootprintBytes(spec.sizeBytes)
+        val footprintGb = footprintBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+        val ramCapable = footprintBytes <= profile.ramBudgetBytes
+        val ramMarginal = !ramCapable && footprintBytes <= profile.ramHardCapBytes
 
         val findings = mutableListOf<String>()
 
         findings.add(
             String.format(
                 Locale.US,
-                "SoC & Tier: %s · %s · %s",
+                "SoC & RAM Class: %s · %s · %s",
                 profile.socSummary,
                 profile.coreSummary,
-                profile.effectiveTier.label
+                profile.effectiveRamClass.label
             )
         )
 
@@ -721,32 +744,32 @@ class LocalLlmManager(private val context: Context) {
             findings.add("Android API ${profile.apiLevel} is below minimum API ${entry.minApiLevel}")
         }
 
-        val reqRamGb = entry.ramRequiredGb
         when {
             ramCapable -> findings.add(
                 String.format(
                     Locale.US,
-                    "Memory Safety: %.1f GB free / %.1f GB total (requires %.1f GB incl. KV + 25%% headroom)",
-                    profile.availableRamGb,
-                    profile.totalRamGb,
-                    reqRamGb
+                    "Memory Fit: %.2f GB footprint fits within %.1f GB recommended budget on %.1f GB device",
+                    footprintGb,
+                    profile.ramBudgetGb,
+                    profile.totalRamGb
                 )
             )
             ramMarginal -> findings.add(
                 String.format(
                     Locale.US,
-                    "Memory Tight: %.1f GB free / %.1f GB total (model + KV requires %.1f GB; ctx will auto-scale to 1024)",
-                    profile.availableRamGb,
-                    profile.totalRamGb,
-                    reqRamGb
+                    "Above Recommended Budget: %.2f GB footprint (recommended budget %.1f GB, hard cap %.1f GB on %.1f GB device)",
+                    footprintGb,
+                    profile.ramBudgetGb,
+                    profile.ramHardCapGb,
+                    profile.totalRamGb
                 )
             )
             else -> findings.add(
                 String.format(
                     Locale.US,
-                    "Insufficient RAM: needs %.1f GB free RAM, you have %.1f GB (%.1f GB total)",
-                    reqRamGb,
-                    profile.availableRamGb,
+                    "Exceeds Hard Cap: %.2f GB footprint exceeds %.1f GB hard cap on %.1f GB device",
+                    footprintGb,
+                    profile.ramHardCapGb,
                     profile.totalRamGb
                 )
             )

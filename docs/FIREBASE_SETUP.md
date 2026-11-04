@@ -22,14 +22,32 @@ This guide provides step-by-step instructions to configure your own Firebase pro
    com.aistudio.nexusagent.v5sync
    ```
 4. Enter an App nickname (e.g., `Nexus Agent v5`).
-5. In your local terminal, retrieve your debug signing key certificate fingerprints:
-   ```bash
-   keytool -list -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android
-   ```
-6. Add the resulting fingerprints to **SHA certificate fingerprints** in the Firebase Console:
-   - **Debug SHA-1**: `2F:B6:CA:1E:E2:A5:A7:A3:68:52:C3:B0:83:32:CF:78:AB:4B:F0:93`
-   - **Debug SHA-256**: `42:8D:8B:CD:99:8A:4A:EA:76:FE:87:DC:59:3D:9B:9A:81:43:EE:4F:DD:C9:21:D6:D9:56:5F:4B:04:C9:B8:83`
-7. If building a release APK, also add the release keystore's SHA-1 and SHA-256.
+
+### Required Configuration Match Table
+
+| Field | Required Value | Where Configured / Verified |
+| :--- | :--- | :--- |
+| **Package Name (`applicationId`)** | `com.aistudio.nexusagent.v5sync` | `app/build.gradle.kts`, `app/google-services.json` |
+| **Debug Keystore SHA-1** | `82:7D:D6:EC:05:17:6F:2D:EA:87:7A:DA:5A:E0:41:71:D4:AB:D6:F4` | Firebase Console > Project Settings > Android App SHA fingerprints |
+| **Debug Keystore SHA-256** | `49:47:85:37:B1:89:F0:2F:AC:C1:22:16:94:8E:6E:28:9D:31:11:2D:02:A9:2B:A2:88:9C:62:D4:C2:FF:28:92` | Firebase Console > Project Settings > Android App SHA fingerprints |
+| **Release Keystore SHA-1** | `14:EC:D8:29:0E:16:C3:D8:29:EC:31:10:2D:0D:D1:99:A6:B1:12:E3` | Firebase Console > Project Settings > Android App SHA fingerprints |
+| **Release Keystore SHA-256** | `EA:25:BE:3C:7C:2B:54:FB:71:33:12:35:7F:5C:50:FD:AC:37:1C:35:0B:B5:E4:F4:E0:3D:CF:24:2F:5B:B7:17` | Firebase Console > Project Settings > Android App SHA fingerprints |
+| **Web Client ID (`client_type: 3`)** | `68112922414-ef6fb5a80f9b983b1e0be58c1b6f6a82.apps.googleusercontent.com` | `app/google-services.json` (`oauth_client[client_type: 3]`), `default_web_client_id` |
+| **Auth Provider** | Google Sign-in enabled | Firebase Console > Authentication > Sign-in method |
+| **OAuth Consent Screen** | In **Testing** mode: add your Google account to **Test Users** | Google Cloud Console > APIs & Services > OAuth consent screen |
+
+### Verification Commands
+
+```bash
+# Print Debug Keystore Fingerprints
+keytool -list -v -keystore debug.keystore -alias androiddebugkey -storepass android -keypass android | grep -E "SHA1:|SHA256:"
+
+# Print Release Keystore Fingerprints
+keytool -list -v -keystore my-upload-key.jks -alias upload -storepass android -keypass android | grep -E "SHA1:|SHA256:"
+
+# Print Gradle Signing Report
+./gradlew signingReport
+```
 
 ---
 

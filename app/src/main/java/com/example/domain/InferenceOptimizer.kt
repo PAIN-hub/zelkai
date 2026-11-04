@@ -1,6 +1,9 @@
 package com.example.domain
 
+import android.app.ActivityManager
+import android.app.ApplicationExitInfo
 import android.content.Context
+import android.os.Build
 import android.os.Debug
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
@@ -130,7 +133,8 @@ sealed interface ModelLoadResult {
         val requiredRamGb: Double,
         val availableRamGb: Double,
         val userMessage: String,
-        val suggestedModelId: String? = null
+        val suggestedModelId: String? = null,
+        val isSoftWarning: Boolean = false
     ) : ModelLoadResult
 
     data class EngineFailure(
@@ -141,6 +145,18 @@ sealed interface ModelLoadResult {
         val suggestedActionLabel: String = "Retry"
     ) : ModelLoadResult
 }
+
+data class CrashRecoveryNotice(
+    val crashedModelId: String,
+    val crashedModelName: String,
+    val previousCtx: Int,
+    val newMaxCtx: Int?,
+    val markedUnstable: Boolean,
+    val exitReasonLabel: String,
+    val suggestedSmallerModelId: String?,
+    val suggestedSmallerModelName: String?,
+    val userMessage: String
+)
 
 data class ActiveLoadedModelState(
     val modelId: String,
@@ -219,13 +235,20 @@ class InferenceOptimizer(private val context: Context) {
     private val _lastLoadGuardError = MutableStateFlow<ModelLoadResult.RefusedByLoadGuard?>(null)
     val lastLoadGuardError: StateFlow<ModelLoadResult.RefusedByLoadGuard?> = _lastLoadGuardError.asStateFlow()
 
+    private val _crashRecoveryNotice = MutableStateFlow<CrashRecoveryNotice?>(null)
+    val crashRecoveryNotice: StateFlow<CrashRecoveryNotice?> = _crashRecoveryNotice.asStateFlow()
+
+    private val _unstableModelIds = MutableStateFlow<Set<String>>(loadUnstableModelsFromPrefs())
+    val unstableModelIds: StateFlow<Set<String>> = _unstableModelIds.asStateFlow()
+
     private val _isBenchmarking = MutableStateFlow(false)
     val isBenchmarking: StateFlow<Boolean> = _isBenchmarking.asStateFlow()
 
     init {
-        // Hydrate cached benchmarks from Jetpack DataStore asynchronously on startup
+        // Hydrate cached benchmarks & inspect crash markers from Jetpack DataStore asynchronously on startup
         ioScope.launch {
             runCatching {
+                inspectStartupCrashMarker()
                 val dsPrefs = context.benchmarkDataStore.data.first()
                 val currentFingerprint = android.os.Build.FINGERPRINT ?: "api_${android.os.Build.VERSION.SDK_INT}"
                 val currentEngineVer = EngineProvider.engineInfo().version
@@ -274,6 +297,144 @@ class InferenceOptimizer(private val context: Context) {
         _lastLoadGuardError.value = null
     }
 
+    fun dismissCrashRecoveryNotice() {
+        _crashRecoveryNotice.value = null
+    }
+
+    private fun loadUnstableModelsFromPrefs(): Set<String> {
+        return prefs.getStringSet("unstable_model_ids", emptySet())?.toSet().orEmpty()
+    }
+
+    fun getCrashCappedCtxForModel(modelId: String): Int? {
+        val v = prefs.getInt("crash_cap_ctx::$modelId", -1)
+        return if (v >= 512) v else null
+    }
+
+    /**
+     * Writes a `"loading <model, ctx>"` marker in SharedPreferences & Jetpack DataStore before native load;
+     * cleared immediately when load succeeds.
+     */
+    suspend fun recordLoadingMarker(modelId: String, nCtx: Int) {
+        val markerJson = JSONObject().apply {
+            put("modelId", modelId)
+            put("nCtx", nCtx)
+            put("timestampMs", System.currentTimeMillis())
+        }.toString()
+        prefs.edit().putString("active_loading_marker", markerJson).commit()
+        runCatching {
+            val dsKey = stringPreferencesKey("active_loading_marker")
+            context.benchmarkDataStore.edit { ds ->
+                ds[dsKey] = markerJson
+            }
+        }
+    }
+
+    suspend fun clearLoadingMarker() {
+        prefs.edit().remove("active_loading_marker").commit()
+        runCatching {
+            val dsKey = stringPreferencesKey("active_loading_marker")
+            context.benchmarkDataStore.edit { ds ->
+                ds.remove(dsKey)
+            }
+        }
+    }
+
+    /**
+     * On startup, checks whether the previous session died while loading a model (marker still set
+     * or `ApplicationExitInfo` reports `REASON_LOW_MEMORY` / `REASON_CRASH_NATIVE`).
+     * Automatically steps down `n_ctx` (`8192 -> 4096 -> 2048 -> 1024`), or marks the model
+     * `"unstable on this device"` and suggests the next smaller model.
+     */
+    suspend fun inspectStartupCrashMarker(): CrashRecoveryNotice? {
+        val markerRaw = prefs.getString("active_loading_marker", null)
+            ?: runCatching {
+                context.benchmarkDataStore.data.first()[stringPreferencesKey("active_loading_marker")]
+            }.getOrNull()
+            ?: return null
+
+        clearLoadingMarker()
+
+        return runCatching {
+            val obj = JSONObject(markerRaw)
+            val modelId = obj.optString("modelId", "").trim()
+            val prevCtx = obj.optInt("nCtx", 2048)
+            if (modelId.isEmpty()) return@runCatching null
+
+            val exitReasonLabel = detectLastExitReasonLabel()
+            val catalog = ModelRegistry.loadModels(context)
+            val entry = catalog.find { it.id == modelId }
+            val modelName = entry?.name ?: modelId
+            val smallerModel = if (entry != null) {
+                catalog.filter { it.sizeBytes < entry.sizeBytes }.maxByOrNull { it.paramsBillions }
+            } else null
+
+            val nextCtx = when {
+                prevCtx > 4096 -> 4096
+                prevCtx > 2048 -> 2048
+                prevCtx > 1024 -> 1024
+                else -> null
+            }
+
+            val notice = if (nextCtx != null) {
+                prefs.edit().putInt("crash_cap_ctx::$modelId", nextCtx).apply()
+                CrashRecoveryNotice(
+                    crashedModelId = modelId,
+                    crashedModelName = modelName,
+                    previousCtx = prevCtx,
+                    newMaxCtx = nextCtx,
+                    markedUnstable = false,
+                    exitReasonLabel = exitReasonLabel,
+                    suggestedSmallerModelId = smallerModel?.id,
+                    suggestedSmallerModelName = smallerModel?.name,
+                    userMessage = "Previous load of $modelName ($exitReasonLabel at ctx $prevCtx) was interrupted. Automatically reduced context length to $nextCtx."
+                )
+            } else {
+                val updatedUnstable = _unstableModelIds.value + modelId
+                _unstableModelIds.value = updatedUnstable
+                prefs.edit().putStringSet("unstable_model_ids", updatedUnstable).apply()
+                val smallerHint = if (smallerModel != null) {
+                    " Try ${smallerModel.name} (${smallerModel.params}) instead."
+                } else ""
+                CrashRecoveryNotice(
+                    crashedModelId = modelId,
+                    crashedModelName = modelName,
+                    previousCtx = prevCtx,
+                    newMaxCtx = null,
+                    markedUnstable = true,
+                    exitReasonLabel = exitReasonLabel,
+                    suggestedSmallerModelId = smallerModel?.id,
+                    suggestedSmallerModelName = smallerModel?.name,
+                    userMessage = "$modelName crashed during load ($exitReasonLabel) even at minimum 1024 context and was marked unstable on this device.$smallerHint"
+                )
+            }
+            _crashRecoveryNotice.value = notice
+            notice
+        }.getOrNull()
+    }
+
+    private fun detectLastExitReasonLabel(): String {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            runCatching {
+                val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                val exits = am?.getHistoricalProcessExitReasons(context.packageName, 0, 3).orEmpty()
+                val relevant = exits.firstOrNull {
+                    it.reason == ApplicationExitInfo.REASON_LOW_MEMORY ||
+                        it.reason == ApplicationExitInfo.REASON_CRASH_NATIVE ||
+                        it.reason == ApplicationExitInfo.REASON_SIGNALED
+                } ?: exits.firstOrNull()
+                if (relevant != null) {
+                    return when (relevant.reason) {
+                        ApplicationExitInfo.REASON_LOW_MEMORY -> "OS Low Memory Killer"
+                        ApplicationExitInfo.REASON_CRASH_NATIVE -> "Native runtime crash"
+                        ApplicationExitInfo.REASON_SIGNALED -> "OS signal termination"
+                        else -> "Process exit (${relevant.reason})"
+                    }
+                }
+            }
+        }
+        return "Interrupted during native model load"
+    }
+
     /**
      * Cache key per (device, model, engine version) as required by STEP 3.
      */
@@ -315,36 +476,84 @@ class InferenceOptimizer(private val context: Context) {
     }
 
     /**
-     * Load guard: refuses to load if available RAM < model size + 25%.
+     * Load-Time Guard (Part 3 #4):
+     * - Hard block (`isSoftWarning = false`) ONLY if `footprint > hardCap` (`0.70 * totalRam`).
+     * - Soft warning (`isSoftWarning = true`, offering `"Load anyway"`) if `ActivityManager.MemoryInfo.lowMemory`
+     *   is true or `availableRamBytes` is critically low (`< footprint * 0.60`), unless `forceLoad = true`.
+     * Never hard-blocks based on fluctuating `availableRamBytes`!
      */
-    fun checkLoadGuard(profile: DeviceProfile, model: ModelRegistryEntry): ModelLoadResult.RefusedByLoadGuard? {
-        val minRequiredBytes = (model.sizeBytes * 1.25).toLong()
-        if (profile.availableRamBytes < minRequiredBytes) {
-            val gb = 1024.0 * 1024.0 * 1024.0
-            val reqGb = ((minRequiredBytes / gb) * 10.0).roundToInt() / 10.0
-            val availGb = ((profile.availableRamBytes / gb) * 10.0).roundToInt() / 10.0
+    fun checkLoadGuard(
+        profile: DeviceProfile,
+        model: ModelRegistryEntry,
+        nCtx: Int = 1024,
+        forceLoad: Boolean = false
+    ): ModelLoadResult.RefusedByLoadGuard? {
+        val footprintBytes = RamPolicy.estimateModelFootprintBytes(
+            modelFileSize = model.sizeBytes,
+            nCtx = nCtx
+        )
+        val hardCapBytes = profile.ramHardCapBytes
+        val gb = 1024.0 * 1024.0 * 1024.0
+        val footprintGb = ((footprintBytes / gb) * 10.0).roundToInt() / 10.0
+        val hardCapGb = ((hardCapBytes / gb) * 10.0).roundToInt() / 10.0
+        val totalRamGb = profile.totalRamGb
+        val availGb = ((profile.availableRamBytes / gb) * 10.0).roundToInt() / 10.0
+
+        // 1. Hard block ONLY if footprint > hardCap (0.70 * totalRam)
+        if (footprintBytes > hardCapBytes) {
             val smallerAlt = runCatching {
                 ModelRegistry.loadModels(context)
-                    .filter { it.sizeBytes < model.sizeBytes && (it.sizeBytes * 1.25).toLong() <= profile.availableRamBytes }
+                    .filter {
+                        it.sizeBytes < model.sizeBytes &&
+                            RamPolicy.estimateModelFootprintBytes(it.sizeBytes, 1024) <= profile.ramBudgetBytes
+                    }
                     .maxByOrNull { it.paramsBillions }
             }.getOrNull()
             val suggestionSuffix = if (smallerAlt != null) {
-                " Recommended smaller model: ${smallerAlt.name} (${smallerAlt.params})."
+                " Recommended model for your phone: ${smallerAlt.name} (${smallerAlt.params})."
             } else {
-                " Close background apps or pick a smaller model."
+                " Choose a smaller quantization or model."
             }
             return ModelLoadResult.RefusedByLoadGuard(
                 modelId = model.id,
                 modelName = model.name,
-                requiredRamGb = reqGb,
-                availableRamGb = availGb,
-                userMessage = "Load guard refused ${model.name}: requires at least $reqGb GB free RAM (model + 25% safety margin), but only $availGb GB is currently available.$suggestionSuffix",
-                suggestedModelId = smallerAlt?.id
+                requiredRamGb = footprintGb,
+                availableRamGb = hardCapGb,
+                userMessage = "${model.name} requires ~$footprintGb GB footprint, which exceeds the $hardCapGb GB hard cap on your $totalRamGb GB device.$suggestionSuffix",
+                suggestedModelId = smallerAlt?.id,
+                isSoftWarning = false
             )
+        }
+
+        // 2. Soft warning if system currently reports lowMemory or very low free RAM (user can tap "Load anyway")
+        if (!forceLoad) {
+            val isSystemLowMemory = runCatching {
+                val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                val mi = ActivityManager.MemoryInfo()
+                am?.getMemoryInfo(mi)
+                mi.lowMemory
+            }.getOrDefault(false)
+
+            if (isSystemLowMemory || (profile.availableRamBytes in 1 until (footprintBytes * 0.55).toLong())) {
+                return ModelLoadResult.RefusedByLoadGuard(
+                    modelId = model.id,
+                    modelName = model.name,
+                    requiredRamGb = footprintGb,
+                    availableRamGb = availGb,
+                    userMessage = "Free memory is currently low ($availGb GB free right now; ${model.name} uses ~$footprintGb GB). Android will reclaim cached memory automatically, or you can close heavy apps first.",
+                    suggestedModelId = null,
+                    isSoftWarning = true
+                )
+            }
         }
         return null
     }
 
+    /**
+     * Part 3 #5: Sizes `n_ctx` as the largest context value (`1024, 2048, 4096, 8192+`) where
+     * `footprint <= budget` (`RamPolicy.budgetBytes(totalRam)`), tuned from benchmarks and crash markers,
+     * NEVER from `availableRamBytes`.
+     */
     fun autoConfigure(
         profile: DeviceProfile,
         model: ModelRegistryEntry,
@@ -353,34 +562,35 @@ class InferenceOptimizer(private val context: Context) {
     ): OptimizedRuntimeConfig {
         val effectivePreset = if (profile.isBatterySaverOn) InferencePreset.SPEED else userPreset
 
-        val candidateCtxList = when (profile.effectiveTier) {
-            DeviceTier.LOW -> listOf(1024, 2048)
-            DeviceTier.MID -> listOf(1024, 2048, 4096)
-            DeviceTier.HIGH -> listOf(1024, 2048, 4096, 8192)
-            DeviceTier.ULTRA -> listOf(1024, 2048, 4096, 8192, 16384)
+        val candidateCtxList = when (profile.effectiveRamClass) {
+            RamClass.LOW -> listOf(1024, 2048)
+            RamClass.MID -> listOf(1024, 2048, 4096)
+            RamClass.MID_PLUS -> listOf(1024, 2048, 4096)
+            RamClass.HIGH -> listOf(1024, 2048, 4096, 8192)
+            RamClass.HIGH_PLUS -> listOf(1024, 2048, 4096, 8192)
+            RamClass.ULTRA -> listOf(1024, 2048, 4096, 8192, 16384)
         }
 
-        val kvBytesPerToken = when {
-            model.paramsBillions <= 1.8 -> 96L * 1024L
-            model.paramsBillions <= 4.5 -> 128L * 1024L
-            model.paramsBillions <= 9.5 -> 168L * 1024L
-            else -> 256L * 1024L
-        }
-
+        val budgetBytes = profile.ramBudgetBytes.coerceAtLeast(1L)
         var chosenCtx = 1024
         var chosenHeadroomPct = 20
 
         for (ctxCandidate in candidateCtxList) {
-            val runtimeFootprint = model.sizeBytes + (ctxCandidate.toLong() * kvBytesPerToken)
-            val remainingBytes = profile.availableRamBytes - runtimeFootprint
-            val headroomRatio = if (profile.availableRamBytes > 0L) {
-                remainingBytes.toDouble() / profile.availableRamBytes.toDouble()
-            } else 0.0
-
-            if (headroomRatio >= 0.20) {
+            val footprint = RamPolicy.estimateModelFootprintBytes(
+                modelFileSize = model.sizeBytes,
+                nCtx = ctxCandidate
+            )
+            if (footprint <= budgetBytes) {
                 chosenCtx = ctxCandidate
-                chosenHeadroomPct = (headroomRatio * 100.0).roundToInt().coerceIn(0, 95)
+                val remainingRatio = ((budgetBytes - footprint).toDouble() / budgetBytes.toDouble()).coerceIn(0.0, 0.95)
+                chosenHeadroomPct = (20.0 + remainingRatio * 75.0).roundToInt().coerceIn(20, 95)
             }
+        }
+
+        // Respect any crash-recovery context cap recorded for this model
+        val crashCapCtx = getCrashCappedCtxForModel(model.id)
+        if (crashCapCtx != null && chosenCtx > crashCapCtx) {
+            chosenCtx = crashCapCtx
         }
 
         when (effectivePreset) {
@@ -388,12 +598,12 @@ class InferenceOptimizer(private val context: Context) {
                 if (chosenCtx > 2048) chosenCtx = 2048
             }
             InferencePreset.BALANCED -> {
-                if (chosenCtx > 4096 && profile.effectiveTier != DeviceTier.ULTRA) {
+                if (chosenCtx > 4096 && profile.effectiveRamClass.rank < RamClass.HIGH_PLUS.rank) {
                     chosenCtx = 4096
                 }
             }
             InferencePreset.QUALITY -> {
-                // Keep largest context that preserves >= 20% RAM headroom
+                // Keep largest context where footprint <= budget
             }
         }
 
@@ -565,7 +775,7 @@ class InferenceOptimizer(private val context: Context) {
                 kvCacheType = cfg.kvCacheType,
                 maxTokens = 48,
                 expectedSizeBytes = model.sizeBytes,
-                availableRamBytes = profile.availableRamBytes
+                availableRamBytes = profile.ramHardCapBytes
             )
 
             val loadTimeMs = if (alreadyLoaded && engine.isLoaded.value && initialLoadTimeMs > 0L) {
@@ -704,7 +914,8 @@ class InferenceOptimizer(private val context: Context) {
     suspend fun loadAndPrepareModel(
         modelId: String,
         systemPromptPrefix: String = "",
-        modelFile: File? = null
+        modelFile: File? = null,
+        forceLoadDespiteWarning: Boolean = false
     ): ModelLoadResult = withContext(Dispatchers.Default) {
         val entry = ModelRegistry.findById(modelId, context)
             ?: return@withContext ModelLoadResult.EngineFailure(
@@ -713,8 +924,20 @@ class InferenceOptimizer(private val context: Context) {
             )
 
         val profile = DeviceProfiler.measure(context)
+        var benchmark = getBenchmarkForModel(entry.id)
+        var config = autoConfigure(
+            profile = profile,
+            model = entry,
+            benchmark = benchmark,
+            userPreset = _activePreset.value
+        )
 
-        val guardFailure = checkLoadGuard(profile, entry)
+        val guardFailure = checkLoadGuard(
+            profile = profile,
+            model = entry,
+            nCtx = config.nCtx,
+            forceLoad = forceLoadDespiteWarning
+        )
         if (guardFailure != null) {
             _lastLoadGuardError.value = guardFailure
             return@withContext guardFailure
@@ -752,14 +975,6 @@ class InferenceOptimizer(private val context: Context) {
 
         return@withContext try {
             withTimeout(60_000L) {
-                var benchmark = getBenchmarkForModel(entry.id)
-                var config = autoConfigure(
-                    profile = profile,
-                    model = entry,
-                    benchmark = benchmark,
-                    userPreset = _activePreset.value
-                )
-
                 val reusedKv = existing != null &&
                     existing.modelId == entry.id &&
                     engine.isLoaded.value &&
@@ -777,24 +992,26 @@ class InferenceOptimizer(private val context: Context) {
                         kvCacheType = config.kvCacheType,
                         systemInstruction = systemPromptPrefix,
                         expectedSizeBytes = entry.sizeBytes,
-                        availableRamBytes = profile.availableRamBytes
+                        availableRamBytes = profile.ramHardCapBytes
                     )
+                    recordLoadingMarker(entry.id, config.nCtx)
                     val loadStart = System.currentTimeMillis()
                     val engineLoad = engine.load(modelFile.absolutePath, loadParams)
                     val loadTimeMs = (System.currentTimeMillis() - loadStart).coerceAtLeast(1L)
 
                     if (engineLoad.isFailure) {
+                        clearLoadingMarker()
                         val ex = engineLoad.exceptionOrNull()
                         if (ex is TypedLocalInferenceException) {
                             if (ex.kind == LocalRuntimeErrorKind.OUT_OF_MEMORY) {
                                 val gb = 1024.0 * 1024.0 * 1024.0
-                                val reqGb = (((entry.sizeBytes * 1.25) / gb) * 10.0).roundToInt() / 10.0
-                                val availGb = ((profile.availableRamBytes / gb) * 10.0).roundToInt() / 10.0
+                                val reqGb = ((RamPolicy.estimateModelFootprintBytes(entry.sizeBytes, config.nCtx) / gb) * 10.0).roundToInt() / 10.0
+                                val capGb = profile.ramHardCapGb
                                 val oomGuard = ModelLoadResult.RefusedByLoadGuard(
                                     modelId = entry.id,
                                     modelName = entry.name,
                                     requiredRamGb = reqGb,
-                                    availableRamGb = availGb,
+                                    availableRamGb = capGb,
                                     userMessage = ex.userMessage,
                                     suggestedModelId = ex.suggestedModelId
                                 )
@@ -815,6 +1032,7 @@ class InferenceOptimizer(private val context: Context) {
                             reason = err
                         )
                     }
+                    clearLoadingMarker()
 
                     // STEP 3: After the first successful load of this model, run warm-up + 3 timed runs
                     if (benchmark == null) {

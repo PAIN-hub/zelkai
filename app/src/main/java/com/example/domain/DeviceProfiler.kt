@@ -22,6 +22,112 @@ enum class DeviceTier(val label: String, val rank: Int) {
     fun stepDown(): DeviceTier = entries.getOrElse(rank - 1) { LOW }
 }
 
+/**
+ * Total-RAM class with tolerance for kernel/modem carve-outs (e.g. an 8 GB phone reports ~7.4–7.8 GB).
+ * Used for all model recommendations, context sizing, and load budgets — NEVER free/available RAM.
+ */
+enum class RamClass(
+    val label: String,
+    val nominalGb: Int,
+    val budgetFraction: Double,
+    val rank: Int
+) {
+    LOW("LOW (<=3 GB)", 3, 0.40, 0),
+    MID("MID (4 GB)", 4, 0.45, 1),
+    MID_PLUS("MID_PLUS (6 GB)", 6, 0.50, 2),
+    HIGH("HIGH (8 GB)", 8, 0.55, 3),
+    HIGH_PLUS("HIGH_PLUS (12 GB)", 12, 0.60, 4),
+    ULTRA("ULTRA (16 GB+)", 16, 0.60, 5);
+
+    fun stepUp(): RamClass = entries.getOrElse(rank + 1) { ULTRA }
+    fun stepDown(): RamClass = entries.getOrElse(rank - 1) { LOW }
+
+    fun toDeviceTier(): DeviceTier = when (this) {
+        LOW -> DeviceTier.LOW
+        MID, MID_PLUS -> DeviceTier.MID
+        HIGH, HIGH_PLUS -> DeviceTier.HIGH
+        ULTRA -> DeviceTier.ULTRA
+    }
+
+    companion object {
+        fun fromTotalRamBytes(totalRamBytes: Long): RamClass {
+            val totalGb = totalRamBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)
+            return when {
+                totalGb <= 3.5 -> LOW
+                totalGb <= 5.0 -> MID
+                totalGb <= 7.0 -> MID_PLUS
+                totalGb <= 10.0 -> HIGH
+                totalGb <= 14.0 -> HIGH_PLUS
+                else -> ULTRA
+            }
+        }
+    }
+}
+
+/**
+ * Deterministic total-RAM budget and model footprint calculator.
+ * Android keeps unused RAM full of caches that it reclaims on demand, so model compatibility,
+ * context length, and load guards must be based on Total RAM (`MemTotal` / `MemoryInfo.totalMem`),
+ * never on fluctuating `availMem`.
+ */
+object RamPolicy {
+    const val HARD_CAP_FRACTION = 0.70
+    const val RUNTIME_OVERHEAD_MULTIPLIER = 1.12
+
+    fun budgetBytes(totalRamBytes: Long, ramClass: RamClass = RamClass.fromTotalRamBytes(totalRamBytes)): Long {
+        return (totalRamBytes.toDouble() * ramClass.budgetFraction).toLong()
+    }
+
+    fun hardCapBytes(totalRamBytes: Long): Long {
+        return (totalRamBytes.toDouble() * HARD_CAP_FRACTION).toLong()
+    }
+
+    /**
+     * Computes KV cache size from GGUF metadata (`n_layer`, `n_head_kv`, `head_dim`, `n_ctx`, `q8_0`/`f16`)
+     * or falls back to a proportional estimate from `modelFileSize` and `nCtx`.
+     */
+    fun estimateKvCacheBytes(
+        modelFileSize: Long,
+        nCtx: Int = 2048,
+        nLayer: Int = 0,
+        nHeadKv: Int = 0,
+        headDim: Int = 0,
+        kvBytesPerElem: Int = 1 // 1 byte for q8_0, 2 bytes for f16
+    ): Long {
+        val safeCtx = nCtx.coerceAtLeast(512).toLong()
+        return if (nLayer > 0 && nHeadKv > 0 && headDim > 0) {
+            2L * nLayer.toLong() * nHeadKv.toLong() * headDim.toLong() * safeCtx * kvBytesPerElem.coerceAtLeast(1).toLong()
+        } else {
+            // Fallback: ~7% of model size at 2048 context with q8_0 KV cache
+            val ctxScale = safeCtx.toDouble() / 2048.0
+            val kvTypeScale = if (kvBytesPerElem <= 1) 1.0 else 1.8
+            (modelFileSize.toDouble() * 0.07 * ctxScale * kvTypeScale).toLong()
+        }
+    }
+
+    /**
+     * `footprint = (modelFileSize + kvCache) + 12% runtime overhead`
+     */
+    fun estimateModelFootprintBytes(
+        modelFileSize: Long,
+        nCtx: Int = 2048,
+        nLayer: Int = 0,
+        nHeadKv: Int = 0,
+        headDim: Int = 0,
+        kvBytesPerElem: Int = 1
+    ): Long {
+        val kv = estimateKvCacheBytes(
+            modelFileSize = modelFileSize,
+            nCtx = nCtx,
+            nLayer = nLayer,
+            nHeadKv = nHeadKv,
+            headDim = headDim,
+            kvBytesPerElem = kvBytesPerElem
+        )
+        return ((modelFileSize + kv).toDouble() * RUNTIME_OVERHEAD_MULTIPLIER).toLong()
+    }
+}
+
 data class CpuTopologyProfile(
     val totalCores: Int,
     val primeCores: Int,
@@ -67,13 +173,31 @@ data class DeviceProfile(
     val vulkanVersionLabel: String,
     val microBenchmark: MicroBenchmarkScore,
     val baseTier: DeviceTier,
-    val effectiveTier: DeviceTier
+    val effectiveTier: DeviceTier,
+    val baseRamClass: RamClass = RamClass.fromTotalRamBytes(totalRamBytes),
+    val effectiveRamClass: RamClass = baseRamClass
 ) {
     val totalRamGb: Double
         get() = ((totalRamBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)) * 10.0).roundToLong() / 10.0
 
+    /**
+     * Informational only ("Free memory now: X GB (changes constantly)").
+     * Never used for model recommendation, context sizing, or load rejection.
+     */
     val availableRamGb: Double
         get() = ((availableRamBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)) * 10.0).roundToLong() / 10.0
+
+    val ramBudgetBytes: Long
+        get() = RamPolicy.budgetBytes(totalRamBytes, effectiveRamClass)
+
+    val ramBudgetGb: Double
+        get() = ((ramBudgetBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)) * 10.0).roundToLong() / 10.0
+
+    val ramHardCapBytes: Long
+        get() = RamPolicy.hardCapBytes(totalRamBytes)
+
+    val ramHardCapGb: Double
+        get() = ((ramHardCapBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)) * 10.0).roundToLong() / 10.0
 
     val freeStorageGb: Double
         get() = ((freeStorageBytes.toDouble() / (1024.0 * 1024.0 * 1024.0)) * 10.0).roundToLong() / 10.0
@@ -145,6 +269,13 @@ object DeviceProfiler {
             runMicroBenchmark().also { cachedMicroBenchmark = it }
         }
 
+        val baseRamClass = RamClass.fromTotalRamBytes(totalRamBytes)
+        val effectiveRamClass = adjustRamClassBySoc(
+            baseRamClass = baseRamClass,
+            isHighEndSoc = highEndSoc,
+            topology = cpuTopology,
+            benchmark = bench
+        )
         val baseTier = computeBaseTier(
             totalRamBytes = totalRamBytes,
             isHighEndSoc = highEndSoc,
@@ -188,7 +319,9 @@ object DeviceProfiler {
             vulkanVersionLabel = vulkanLabel,
             microBenchmark = bench,
             baseTier = baseTier,
-            effectiveTier = effectiveTier
+            effectiveTier = effectiveTier,
+            baseRamClass = baseRamClass,
+            effectiveRamClass = effectiveRamClass
         )
     }
 
@@ -233,6 +366,13 @@ object DeviceProfiler {
             compositeScore = benchmarkCompositeScore,
             durationMs = 8L
         )
+        val baseRamClass = RamClass.fromTotalRamBytes(totalBytes)
+        val effectiveRamClass = adjustRamClassBySoc(
+            baseRamClass = baseRamClass,
+            isHighEndSoc = isHighEnd,
+            topology = topology,
+            benchmark = bench
+        )
         val baseTier = computeBaseTier(totalBytes, isHighEnd, topology.performanceCores)
         val effectiveTier = adjustTierByBenchmarkAndThermals(
             baseTier = baseTier,
@@ -263,7 +403,9 @@ object DeviceProfiler {
             vulkanVersionLabel = if (hasVulkanCompute) "Vulkan 1.3" else "CPU NEON",
             microBenchmark = bench,
             baseTier = baseTier,
-            effectiveTier = effectiveTier
+            effectiveTier = effectiveTier,
+            baseRamClass = baseRamClass,
+            effectiveRamClass = effectiveRamClass
         )
     }
 
@@ -582,6 +724,24 @@ object DeviceProfiler {
             compositeScore = composite,
             durationMs = totalMs
         )
+    }
+
+    /**
+     * Adjusts the base [RamClass] by at most 1 step based on SoC class (prime/big cores, max frequency,
+     * high-end SoC identity, and micro-benchmark), while never exceeding physical RAM safety bounds.
+     */
+    fun adjustRamClassBySoc(
+        baseRamClass: RamClass,
+        isHighEndSoc: Boolean,
+        topology: CpuTopologyProfile,
+        benchmark: MicroBenchmarkScore
+    ): RamClass {
+        if (baseRamClass == RamClass.LOW) return RamClass.LOW
+        val isWeakCpu = !isHighEndSoc && topology.maxFreqKhz < 2_100_000L && benchmark.compositeScore <= 28
+        if (isWeakCpu) {
+            return baseRamClass.stepDown()
+        }
+        return baseRamClass
     }
 
     fun computeBaseTier(

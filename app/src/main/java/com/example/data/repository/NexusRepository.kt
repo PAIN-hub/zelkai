@@ -466,13 +466,17 @@ class NexusRepository(private val db: FirebaseFirestore) {
         output: String = "",
         redactions: Long = 0L,
         noticeKind: String = "",
+        title: String? = null,
+        reasoningText: String? = null,
+        thinkingDurationSec: Long? = null,
+        jobId: String? = null,
         entryId: String = "entry_${UUID.randomUUID().toString().replace("-", "").take(16)}"
     ): Result<String> {
         val uid = requireUserId()
         val docRef = db.collection("users").document(uid)
             .collection("sessions").document(sessionId)
             .collection("entries").document(entryId)
-        val payload = mapOf(
+        val payload = mutableMapOf<String, Any>(
             "userId" to uid,
             "sessionId" to sessionId,
             "type" to type,
@@ -491,6 +495,10 @@ class NexusRepository(private val db: FirebaseFirestore) {
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()
         )
+        if (!title.isNullOrBlank()) payload["title"] = title.take(120)
+        if (!reasoningText.isNullOrBlank()) payload["reasoningText"] = reasoningText.take(10000)
+        if (thinkingDurationSec != null && thinkingDurationSec >= 0) payload["thinkingDurationSec"] = thinkingDurationSec.coerceIn(0L, 86400L)
+        if (!jobId.isNullOrBlank()) payload["jobId"] = jobId.take(128)
         return try {
             docRef.set(payload).await()
             Result.success(entryId)
