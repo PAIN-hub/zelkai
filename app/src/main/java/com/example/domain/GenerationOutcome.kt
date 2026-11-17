@@ -86,12 +86,10 @@ sealed interface GenerationOutcome {
 
         fun stripForDisplay(raw: String): String {
             return raw
-                .replace(THINK_BLOCK_CLOSED, "")
+                .replace(THINK_BLOCK_ANY, "")
                 .replace(SH_EXEC_FENCE_CLOSED, "")
                 .replace(NEXUS_FILE_CLOSED, "")
                 .replace(NEXUS_TOOL_CLOSED, "")
-                .replace("<think>", "")
-                .replace("</think>", "")
                 .trim()
         }
 

@@ -88,7 +88,7 @@ if [ "$CONCLUSION" != "success" ]; then
     echo "[gh-watch] Fetching narrowed error diagnostics from Job $JOB_ID..."
     LOG_FILE="$(mktemp)"
     curl -fsSL -L -H "Authorization: token $TOKEN" "https://api.github.com/repos/$REPO_OWNER/$REPO_NAME/actions/jobs/$JOB_ID/logs" -o "$LOG_FILE" || true
-    grep -E "^[0-9T:.-]+Z (e: |.*error:|.*fatal error:|.*CMake Error|.*<failure|.*FAILURE:)" "$LOG_FILE" | tail -n 50 || tail -n 50 "$LOG_FILE"
+    grep -E "^[0-9T:.-]+Z (e: |.*FAILED|.*AssertionError|.*error:|.*fatal error:|.*CMake Error|.*<failure|.*FAILURE:)" "$LOG_FILE" | tail -n 50 || tail -n 50 "$LOG_FILE"
     rm -f "$LOG_FILE"
   else
     echo "[gh-watch] Inspect full logs at: https://github.com/$REPO_OWNER/$REPO_NAME/actions/runs/$RUN_ID"
