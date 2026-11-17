@@ -8,6 +8,7 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.os.Build
 import android.util.Base64
+import com.example.data.model.NexusUserSettings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -781,7 +782,8 @@ class NexusPersonalizationStore(context: Context?) {
             sb.append("[Active Persona: ").append(activePersona.name).append("]\n")
                 .append(activePersona.systemPrompt.trim()).append("\n\n")
         } else {
-            sb.append(baseAgentPersona.trim()).append("\n\n")
+            sb.append(NexusUserSettings.migrateLegacyNexusPromptIfUntouched(baseAgentPersona).trim())
+                .append("\n\n")
         }
 
         if (envDescription != null) {
@@ -931,31 +933,31 @@ class NexusPersonalizationStore(context: Context?) {
                 id = "default",
                 name = "Default",
                 summary = "Balanced coding & Linux workspace assistant",
-                systemPrompt = "You are Nexus Agent, an AI coding and Linux system assistant."
+                systemPrompt = "You are Zelkai, an AI coding and Linux system assistant."
             ),
             NexusPersonaPreset(
                 id = "senior_devops",
                 name = "Senior DevOps",
                 summary = "Infrastructure reliability, shell automation & POSIX diagnostics",
-                systemPrompt = "You are Nexus Agent acting as a Principal DevOps & Site Reliability Engineer. Prioritize idempotent shell commands, safe diagnostics, clear exit-code checks, and defensive scripting."
+                systemPrompt = "You are Zelkai acting as a Principal DevOps & Site Reliability Engineer. Prioritize idempotent shell commands, safe diagnostics, clear exit-code checks, and defensive scripting."
             ),
             NexusPersonaPreset(
                 id = "security_auditor",
                 name = "Security Auditor",
                 summary = "Least-privilege checks, secret hygiene & vulnerability review",
-                systemPrompt = "You are Nexus Agent acting as a Senior Application & Linux Security Auditor. Highlight permission risks, file mode exposures, and least-privilege alternatives before proposing commands."
+                systemPrompt = "You are Zelkai acting as a Senior Application & Linux Security Auditor. Highlight permission risks, file mode exposures, and least-privilege alternatives before proposing commands."
             ),
             NexusPersonaPreset(
                 id = "concise_coder",
                 name = "Concise Coder",
                 summary = "Zero-fluff code blocks and exact shell commands",
-                systemPrompt = "You are Nexus Agent in Concise Coder mode. Output clean, production-ready code blocks and exact commands with minimal commentary."
+                systemPrompt = "You are Zelkai in Concise Coder mode. Output clean, production-ready code blocks and exact commands with minimal commentary."
             ),
             NexusPersonaPreset(
                 id = "teacher",
                 name = "Teacher",
                 summary = "Patient explanations of flags, pipelines, and concepts",
-                systemPrompt = "You are Nexus Agent in Teacher mode. Explain command flags, Linux concepts, and code patterns clearly so the user learns why each step works."
+                systemPrompt = "You are Zelkai in Teacher mode. Explain command flags, Linux concepts, and code patterns clearly so the user learns why each step works."
             )
         )
 

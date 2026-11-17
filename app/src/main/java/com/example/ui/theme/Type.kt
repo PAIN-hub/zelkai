@@ -124,4 +124,3 @@ fun scaledTypography(scaleFactor: Float): Typography {
         labelSmall = Typography.labelSmall.scale()
     )
 }
-

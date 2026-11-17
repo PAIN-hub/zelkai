@@ -14,10 +14,10 @@ val NexusSurfaceLight = Color(0xFFF0EFEA)
 val NexusUserBubbleLight = Color(0xFFE6E4DD)
 val NexusOnUserBubbleLight = Color(0xFF111318) // Contrast vs #E6E4DD is ~13.9:1 (WCAG AAA)
 val NexusAiTextLight = Color(0xFF141519)       // Contrast vs #F7F6F3 is ~15.8:1 (WCAG AAA)
-val NexusBorderLight = Color(0xFFE4E2DA)
-val NexusBorderStrongLight = Color(0xFFD2CFC4)
+val NexusBorderLight = Color(0xFFE6E4DC)
+val NexusBorderStrongLight = Color(0xFFCFCBC0)
 val NexusTextLight = Color(0xFF141519)
-val NexusMutedLight = Color(0xFF5A5D68)
+val NexusMutedLight = Color(0xFF565963)
 
 // Editorial Dark Palette — Near-black (#0B0D11), subtle slate surfaces, high-contrast text
 val NexusBgDark = Color(0xFF0B0D11)
@@ -26,8 +26,8 @@ val NexusSurfaceDark = Color(0xFF1A1E27)
 val NexusUserBubbleDark = Color(0xFF232836)
 val NexusOnUserBubbleDark = Color(0xFFF8FAFC)  // Contrast vs #232836 is ~13.2:1 (WCAG AAA)
 val NexusAiTextDark = Color(0xFFF1F5F9)        // Contrast vs #0B0D11 is ~16.8:1 (WCAG AAA)
-val NexusBorderDark = Color(0xFF232834)
-val NexusBorderStrongDark = Color(0xFF313847)
+val NexusBorderDark = Color(0xFF242936)
+val NexusBorderStrongDark = Color(0xFF333A4B)
 val NexusTextDark = Color(0xFFF1F5F9)
 val NexusMutedDark = Color(0xFF94A3B8)
 
@@ -40,7 +40,7 @@ val NexusBorderStrong = NexusBorderStrongLight
 val NexusText = NexusTextLight
 val NexusMuted = NexusMutedLight
 
-// Nexus Indigo → Violet Brand Accent
+// Brand Accent (Indigo -> Violet)
 val NexusAccent = Color(0xFF4F46E5)
 val NexusAccent2 = Color(0xFF7C3AED)
 val NexusAccentSoftLight = Color(0xFFEEF2FF)
@@ -88,7 +88,13 @@ data class NexusSemanticColors(
     val onSurfaceVariant: Color,
     val background: Color,
     val onBackground: Color,
-    val outline: Color
+    val outline: Color,
+    val borderStrong: Color = outline,
+    val accent: Color = NexusAccent,
+    val accentSoft: Color = if (isDark) NexusAccentSoftDark else NexusAccentSoftLight,
+    val ok: Color = NexusOk,
+    val warn: Color = NexusWarn,
+    val danger: Color = NexusDanger
 )
 
 val LightNexusSemanticColors = NexusSemanticColors(
@@ -103,7 +109,13 @@ val LightNexusSemanticColors = NexusSemanticColors(
     onSurfaceVariant = NexusMutedLight,
     background = NexusBgLight,
     onBackground = NexusTextLight,
-    outline = NexusBorderLight
+    outline = NexusBorderLight,
+    borderStrong = NexusBorderStrongLight,
+    accent = NexusAccent,
+    accentSoft = NexusAccentSoftLight,
+    ok = NexusOk,
+    warn = NexusWarn,
+    danger = NexusDanger
 )
 
 val DarkNexusSemanticColors = NexusSemanticColors(
@@ -118,7 +130,13 @@ val DarkNexusSemanticColors = NexusSemanticColors(
     onSurfaceVariant = NexusMutedDark,
     background = NexusBgDark,
     onBackground = NexusTextDark,
-    outline = NexusBorderDark
+    outline = NexusBorderDark,
+    borderStrong = NexusBorderStrongDark,
+    accent = Color(0xFF818CF8),
+    accentSoft = NexusAccentSoftDark,
+    ok = Color(0xFF2DD4BF),
+    warn = Color(0xFFFBBF24),
+    danger = Color(0xFFF87171)
 )
 
 val LocalNexusColors = staticCompositionLocalOf { LightNexusSemanticColors }
@@ -140,29 +158,37 @@ data class NexusPalette(
     val logSurface: Color,
     val onLogSurface: Color,
     val logStderr: Color,
-    val logWarning: Color
+    val logWarning: Color,
+    val isDark: Boolean = false,
+    val bg: Color = NexusBgLight,
+    val borderStrong: Color = NexusBorderStrongLight,
+    val accentSoft: Color = NexusAccentSoftLight
 )
 
 @androidx.compose.runtime.Composable
 fun rememberNexusPalette(): NexusPalette {
     val semantic = LocalNexusColors.current
     return NexusPalette(
-        safeGreen = NexusOk,
-        accent = NexusAccent,
+        safeGreen = semantic.ok,
+        accent = semantic.accent,
         textPrimary = semantic.onSurface,
         textSecondary = semantic.onSurfaceVariant,
         textMuted = semantic.onSurfaceVariant.copy(alpha = 0.72f),
-        WarnAmber = NexusWarn,
+        WarnAmber = semantic.warn,
         surfaceCard = semantic.surface,
         surfaceModal = semantic.surface,
         surfaceInput = semantic.surfaceVariant,
         terminalBg = if (semantic.isDark) NexusLogSurfaceDark else NexusLogSurfaceLight,
         borderSubtle = semantic.outline,
-        dangerRed = NexusDanger,
+        dangerRed = semantic.danger,
         logSurface = if (semantic.isDark) NexusLogSurfaceDark else NexusLogSurfaceLight,
         onLogSurface = if (semantic.isDark) NexusOnLogSurfaceDark else NexusOnLogSurfaceLight,
         logStderr = NexusLogStderr,
-        logWarning = NexusLogWarning
+        logWarning = NexusLogWarning,
+        isDark = semantic.isDark,
+        bg = semantic.background,
+        borderStrong = semantic.borderStrong,
+        accentSoft = semantic.accentSoft
     )
 }
 
@@ -186,4 +212,3 @@ fun wcagContrastRatio(foreground: Color, background: Color): Double {
     val darker = min(l1, l2)
     return (lighter + 0.05) / (darker + 0.05)
 }
-

@@ -112,7 +112,7 @@ class MultiPlatformAiEngine(
             currentCwd: String
         ): String {
             return """
-You are Nexus Agent on Android Linux (Termux / toybox environment).
+You are Zelkai on Android Linux (Termux / toybox environment).
 Real working directory (cwd): $currentCwd
 Constraints: no sudo, no apt/apt-get, Termux bash or toybox/mksh commands.
 Protocol: To run a shell command or create/edit files in cwd, output ONLY one `sh-exec` block (1 command per block, max 1 per step, no unescaped multi-line chains). For long-running servers (`npm run dev`, `python -m http.server`, `node server.js`, `flask run`), use `start_job <command>`, `job_status <id>`, `job_logs <id> 30`, or `stop_job <id>`. After `[TOOL_EXECUTION_RESULT]`, summarize the result in plain text.
@@ -138,7 +138,7 @@ start_job python -m http.server 8000
             currentCwd: String
         ): String {
             val basePersona = personaPrompt.ifBlank {
-                "You are Nexus Agent, an AI software engineer and Android Linux shell assistant."
+                "You are Zelkai, an AI software engineer and Android Linux shell assistant."
             }
             return """
 $basePersona
@@ -444,7 +444,7 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
 
     private var streamingHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
 
@@ -1257,10 +1257,6 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
                         val prefix = if (emittedAnyText) "\n\n" else ""
                         emit("$prefix$toolBlock")
                         emittedAnyText = true
-                    }
-
-                    if (!emittedAnyText) {
-                        emit("(empty response from $modelId)")
                     }
                     return
                 }

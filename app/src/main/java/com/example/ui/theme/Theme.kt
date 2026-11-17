@@ -5,6 +5,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -116,6 +117,37 @@ object NexusThemeTokens {
         @Composable
         @ReadOnlyComposable
         get() = LocalNexusColors.current
+
+    val spacing: NexusSpacing
+        get() = NexusSpacing
+
+    val shapes: Shapes
+        @Composable
+        @ReadOnlyComposable
+        get() = MaterialTheme.shapes
+
+    val elevation: NexusElevation
+        get() = NexusElevation
+
+    val widthTier: WindowWidthTier
+        @Composable
+        @ReadOnlyComposable
+        get() = LocalWindowWidthTier.current
+}
+
+@Composable
+fun NexusTheme(
+    darkTheme: Boolean = false,
+    dynamicColor: Boolean = false,
+    fontScale: Float = 1.0f,
+    content: @Composable () -> Unit
+) {
+    MyApplicationTheme(
+        darkTheme = darkTheme,
+        dynamicColor = dynamicColor,
+        fontScale = fontScale,
+        content = content
+    )
 }
 
 @Composable
@@ -129,10 +161,15 @@ fun MyApplicationTheme(
     val semanticColors = if (darkTheme) DarkNexusSemanticColors else LightNexusSemanticColors
     val animatedScheme = animateColorScheme(targetScheme)
     val activeTypography = scaledTypography(fontScale)
+    val widthTier = rememberWindowWidthTier()
 
-    CompositionLocalProvider(LocalNexusColors provides semanticColors) {
+    CompositionLocalProvider(
+        LocalNexusColors provides semanticColors,
+        LocalWindowWidthTier provides widthTier
+    ) {
         MaterialTheme(
             colorScheme = animatedScheme,
+            shapes = NexusShapes,
             typography = activeTypography
         ) {
             ProvideSafeTextToolbar {

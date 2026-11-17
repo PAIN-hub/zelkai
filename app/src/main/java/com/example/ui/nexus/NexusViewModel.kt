@@ -4293,22 +4293,29 @@ class NexusViewModel(
                 envDescription = _environmentDescription.value
             )
 
-            withTimeout(60_000L) {
-                multiPlatformEngine.streamCompletion(
-                    provider = activeProv,
-                    modelId = activeMod,
-                    maxTokens = cfg.maxTokens,
-                    entries = workingEntries.toList(),
-                    personaPrompt = effectiveSystemPrompt,
-                    currentCwd = _currentWorkingDir.value.ifBlank { shellBridge.currentCwd },
-                    fallbackUserPrompt = initialUserPrompt
-                ).collect { delta ->
-                    if (delta.isNotEmpty()) {
-                        accumulated.append(delta)
-                        _agentStatus.value = AgentStatus.Working(AgentPhase.WRITING)
-                        _streamingText.value = stripToolTagsForDisplay(accumulated.toString())
+            try {
+                withTimeout(180_000L) {
+                    multiPlatformEngine.streamCompletion(
+                        provider = activeProv,
+                        modelId = activeMod,
+                        maxTokens = cfg.maxTokens,
+                        entries = workingEntries.toList(),
+                        personaPrompt = effectiveSystemPrompt,
+                        currentCwd = _currentWorkingDir.value.ifBlank { shellBridge.currentCwd },
+                        fallbackUserPrompt = initialUserPrompt
+                    ).collect { delta ->
+                        if (delta.isNotEmpty()) {
+                            accumulated.append(delta)
+                            _agentStatus.value = AgentStatus.Working(AgentPhase.WRITING)
+                            _streamingText.value = stripToolTagsForDisplay(accumulated.toString())
+                        }
                     }
                 }
+            } catch (timeoutEx: TimeoutCancellationException) {
+                if (accumulated.isEmpty()) {
+                    throw timeoutEx
+                }
+                logPipelineStage("1_MODEL_OUTPUT_TIMEOUT_PARTIAL", "Preserving ${accumulated.length} chars after stream timeout")
             }
 
             val fullRawText = accumulated.toString()

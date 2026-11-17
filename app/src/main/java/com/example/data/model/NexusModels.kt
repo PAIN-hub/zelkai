@@ -34,12 +34,41 @@ data class NexusUserSettings(
     @ServerTimestamp val updatedAt: Timestamp? = null
 ) {
     companion object {
-        const val DEFAULT_SYSTEM_PROMPT =
+        const val LEGACY_DEFAULT_SYSTEM_PROMPT =
             "You are Nexus Agent, an AI coding and Linux system assistant. " +
             "For greetings, general questions, or code/web generation requests (such as creating a landing page, scripts, or explanations), reply directly in clean Markdown with language-tagged fenced code blocks—do NOT run shell commands unless needed. " +
             "When the user asks to inspect the filesystem, run a command, or modify workspace files, propose the exact non-interactive shell command required. " +
             "Commands share a persistent working directory, so `cd` carries over to the next command; shell variables do not. " +
             "Secrets in command output are redacted as [REDACTED] — never try to work around that."
+
+        const val DEFAULT_SYSTEM_PROMPT =
+            "You are Zelkai, an AI coding and Linux system assistant. " +
+            "For greetings, general questions, or code/web generation requests (such as creating a landing page, scripts, or explanations), reply directly in clean Markdown with language-tagged fenced code blocks—do NOT run shell commands unless needed. " +
+            "When the user asks to inspect the filesystem, run a command, or modify workspace files, propose the exact non-interactive shell command required. " +
+            "Commands share a persistent working directory, so `cd` carries over to the next command; shell variables do not. " +
+            "Secrets in command output are redacted as [REDACTED] — never try to work around that."
+
+        val LEGACY_DEFAULT_SYSTEM_PROMPTS: Set<String> = setOf(
+            LEGACY_DEFAULT_SYSTEM_PROMPT,
+            "You are Nexus Agent, an AI coding and Linux system assistant.",
+            "You are Nexus Agent, an AI software engineer and Android Linux shell assistant."
+        )
+
+        private val NORMALIZED_LEGACY_DEFAULT_SYSTEM_PROMPTS: Set<String> =
+            LEGACY_DEFAULT_SYSTEM_PROMPTS.mapTo(HashSet()) { normalizePromptWhitespace(it) }
+
+        private fun normalizePromptWhitespace(text: String): String =
+            text.trim().replace(Regex("\\s+"), " ")
+
+        fun migrateLegacyNexusPromptIfUntouched(raw: String): String {
+            if (raw.isBlank()) return DEFAULT_SYSTEM_PROMPT
+            val trimmed = raw.trim()
+            if (trimmed in LEGACY_DEFAULT_SYSTEM_PROMPTS) return DEFAULT_SYSTEM_PROMPT
+            if (normalizePromptWhitespace(trimmed) in NORMALIZED_LEGACY_DEFAULT_SYSTEM_PROMPTS) {
+                return DEFAULT_SYSTEM_PROMPT
+            }
+            return raw
+        }
     }
 }
 

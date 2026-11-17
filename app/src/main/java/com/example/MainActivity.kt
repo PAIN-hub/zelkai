@@ -6,13 +6,18 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -35,8 +40,9 @@ import com.example.domain.LocalLlmManager
 import com.example.domain.NexusToolAndRedactor
 import com.example.ui.auth.AuthScreen
 import com.example.ui.nexus.NexusMainScreen
-import com.example.ui.theme.MyApplicationTheme
+import com.example.ui.theme.NexusTheme
 import com.example.ui.theme.NexusThemeMode
+import com.example.ui.theme.NexusThemeTokens
 import com.example.util.configureAppCheck
 import com.google.firebase.Firebase
 import com.google.firebase.auth.FirebaseAuth
@@ -150,7 +156,7 @@ class MainActivity : ComponentActivity() {
 
             val feedbackController = remember { com.example.ui.nexus.FeedbackController() }
 
-            MyApplicationTheme(
+            NexusTheme(
                 darkTheme = isDarkTheme,
                 fontScale = fontScale
             ) {
@@ -159,30 +165,49 @@ class MainActivity : ComponentActivity() {
                 ) {
                     Surface(
                         modifier = Modifier.fillMaxSize(),
-                        color = if (isDarkTheme) androidx.compose.ui.graphics.Color(0xFF0B0D11) else androidx.compose.ui.graphics.Color(0xFFF7F6F3)
+                        color = NexusThemeTokens.colors.background
                     ) {
                         if (recoveredCrashMessage != null) {
-                            Column(
+                            Box(
                                 modifier = Modifier
                                     .fillMaxSize()
-                                    .padding(24.dp),
-                                verticalArrangement = Arrangement.Center,
-                                horizontalAlignment = Alignment.CenterHorizontally
+                                    .padding(NexusThemeTokens.spacing.xl),
+                                contentAlignment = Alignment.Center
                             ) {
-                                Text(
-                                    text = "Nexus Agent Recovered Safely",
-                                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                                    color = MaterialTheme.colorScheme.onBackground
-                                )
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = recoveredCrashMessage.orEmpty(),
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Spacer(modifier = Modifier.height(16.dp))
-                                Button(onClick = { recoveredCrashMessage = null }) {
-                                    Text("Continue to Workspace")
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .widthIn(max = NexusThemeTokens.spacing.readingMeasureCompact),
+                                    shape = MaterialTheme.shapes.large,
+                                    color = NexusThemeTokens.colors.surface,
+                                    border = BorderStroke(1.dp, NexusThemeTokens.colors.outline),
+                                    tonalElevation = NexusThemeTokens.elevation.subtle
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(NexusThemeTokens.spacing.xl),
+                                        verticalArrangement = Arrangement.Center,
+                                        horizontalAlignment = Alignment.Start
+                                    ) {
+                                        Text(
+                                            text = "Zelkai Recovered Safely",
+                                            style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                                            color = NexusThemeTokens.colors.onSurface
+                                        )
+                                        Spacer(modifier = Modifier.height(NexusThemeTokens.spacing.sm))
+                                        Text(
+                                            text = recoveredCrashMessage.orEmpty(),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            color = NexusThemeTokens.colors.onSurfaceVariant
+                                        )
+                                        Spacer(modifier = Modifier.height(NexusThemeTokens.spacing.lg))
+                                        Button(
+                                            onClick = { recoveredCrashMessage = null },
+                                            modifier = Modifier.heightIn(min = NexusThemeTokens.spacing.minTouchTarget),
+                                            shape = MaterialTheme.shapes.small
+                                        ) {
+                                            Text("Continue to Workspace")
+                                        }
+                                    }
                                 }
                             }
                         } else {

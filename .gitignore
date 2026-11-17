@@ -23,4 +23,5 @@ third_party/
 .aistudio/
 public/
 .vscode/
+dist/
 *-debug.log

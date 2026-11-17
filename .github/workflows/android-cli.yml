@@ -2,9 +2,9 @@ name: ZELKAI Android CI & Fast Error Narrowing
 
 on:
   push:
-    branches: [ "master", "main" ]
+    branches: [ "master", "main", "feat/**", "fix/**" ]
   pull_request:
-    branches: [ "master", "main" ]
+    branches: [ "master", "main", "feat/**", "fix/**" ]
   workflow_dispatch:
 
 concurrency:
