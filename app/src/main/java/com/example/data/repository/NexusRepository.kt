@@ -127,7 +127,34 @@ class NexusRepository(private val db: FirebaseFirestore) {
         }
     }
 
+    private fun normalizeStorageLocation(raw: String?): String = when (raw?.trim()) {
+        "termux_home", "termux_home_mirrored" -> "termux_home_mirrored"
+        "temp_scratch" -> "temp_scratch"
+        else -> "shared_storage"
+    }
+
     // 2. Sessions Real-Time Observation & CRUD
+    suspend fun fetchSessionsOnce(): Result<List<NexusSession>> {
+        val uid = requireUserId()
+        val path = "users/$uid/sessions"
+        return try {
+            val snapshot = db.collection("users").document(uid).collection("sessions")
+                .whereEqualTo("userId", uid)
+                .get()
+                .await()
+            val list = snapshot.toObjects(
+                NexusSession::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+            ).sortedByDescending { it.updatedAt?.seconds ?: it.createdAt?.seconds ?: 0L }
+            Result.success(list)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, path)
+            Result.failure(e)
+        }
+    }
+
     fun observeSessions(): Flow<List<NexusSession>> = flow {
         val uid = requireUserId()
         val path = "users/$uid/sessions"
@@ -169,7 +196,7 @@ class NexusRepository(private val db: FirebaseFirestore) {
             "provider" to provider.take(40),
             "model" to model.take(120),
             "projectSlug" to projectSlug.take(64),
-            "storageLocation" to storageLocation.ifBlank { "shared_storage" },
+            "storageLocation" to normalizeStorageLocation(storageLocation),
             "createdAt" to FieldValue.serverTimestamp(),
             "updatedAt" to FieldValue.serverTimestamp()
         )
@@ -231,7 +258,7 @@ class NexusRepository(private val db: FirebaseFirestore) {
         val docRef = db.collection("users").document(uid).collection("sessions").document(sessionId)
         val updates = mapOf(
             "projectSlug" to projectSlug.take(64),
-            "storageLocation" to storageLocation.ifBlank { "shared_storage" },
+            "storageLocation" to normalizeStorageLocation(storageLocation),
             "cwd" to cwd.ifBlank { "/" }.take(512),
             "updatedAt" to FieldValue.serverTimestamp()
         )
@@ -292,7 +319,7 @@ class NexusRepository(private val db: FirebaseFirestore) {
                 "provider" to session.provider.take(40),
                 "model" to session.model.take(120),
                 "projectSlug" to session.projectSlug.take(64),
-                "storageLocation" to session.storageLocation.ifBlank { "shared_storage" },
+                "storageLocation" to normalizeStorageLocation(session.storageLocation),
                 "createdAt" to (session.createdAt ?: FieldValue.serverTimestamp()),
                 "updatedAt" to FieldValue.serverTimestamp()
             )
@@ -411,7 +438,7 @@ class NexusRepository(private val db: FirebaseFirestore) {
             updates["projectSlug"] = projectSlug.take(64)
         }
         if (!storageLocation.isNullOrBlank()) {
-            updates["storageLocation"] = storageLocation
+            updates["storageLocation"] = normalizeStorageLocation(storageLocation)
         }
         return try {
             docRef.update(updates).await()
@@ -425,6 +452,32 @@ class NexusRepository(private val db: FirebaseFirestore) {
     }
 
     // 3. Transcript Entries Real-Time Observation & CRUD
+    suspend fun fetchEntriesOnce(sessionId: String): Result<List<TranscriptEntry>> {
+        val uid = requireUserId()
+        val path = "users/$uid/sessions/$sessionId/entries"
+        return try {
+            val snapshot = db.collection("users").document(uid)
+                .collection("sessions").document(sessionId)
+                .collection("entries")
+                .whereEqualTo("userId", uid)
+                .get()
+                .await()
+            val list = snapshot.toObjects(
+                TranscriptEntry::class.java,
+                DocumentSnapshot.ServerTimestampBehavior.ESTIMATE
+            ).sortedWith(
+                compareBy<TranscriptEntry> { it.sequence }
+                    .thenBy { it.createdAt?.seconds ?: 0L }
+                    .thenBy { it.createdAt?.nanoseconds ?: 0 }
+            )
+            Result.success(list)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.LIST, path)
+            Result.failure(e)
+        }
+    }
     fun observeEntries(sessionId: String): Flow<List<TranscriptEntry>> = flow {
         val uid = requireUserId()
         val path = "users/$uid/sessions/$sessionId/entries"

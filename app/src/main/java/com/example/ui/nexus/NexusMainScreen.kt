@@ -31,11 +31,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -61,6 +63,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PersonOutline
 import androidx.compose.material.icons.filled.StopCircle
+import androidx.compose.material.icons.filled.Sync
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -265,6 +268,7 @@ fun NexusMainScreen(
     val isTemporaryChat by viewModel.isTemporaryChat.collectAsStateWithLifecycle()
     val temporarySession by viewModel.temporarySession.collectAsStateWithLifecycle()
     val messageFeedback by viewModel.messageFeedback.collectAsStateWithLifecycle()
+    val isSyncing by viewModel.isSyncing.collectAsStateWithLifecycle()
 
     // Part A/B/C/D StateFlows
     val deviceProfile by viewModel.deviceProfile.collectAsStateWithLifecycle()
@@ -498,17 +502,23 @@ fun NexusMainScreen(
         }
     }
 
-    LaunchedEffect(entries.size, streamingText, viewMode, missingApiKeyPrompt, loadGuardError) {
+    val turnsCount = remember(entries, isRunning) {
+        TurnTimelineBuilder.partitionIntoTurns(entries, isRunning).size
+    }
+
+    LaunchedEffect(turnsCount, entries.size, streamingText, viewMode, missingApiKeyPrompt, loadGuardError) {
         if (viewMode != NexusViewMode.DASHBOARD) {
-            val extraItems = (if (streamingText != null) 1 else 0) +
+            val totalItems = listState.layoutInfo.totalItemsCount
+            val fallbackTotal = turnsCount +
                 (if (missingApiKeyPrompt != null) 1 else 0) +
                 (if (loadGuardError != null) 1 else 0) +
-                (if (viewMode == NexusViewMode.TERMINAL) 1 else 0)
-            val total = entries.size + extraItems
-            if (total > 0 && !listState.canScrollForward) {
-                listState.animateScrollToItem(total - 1)
-            } else if (total > 0 && entries.size <= 2) {
-                listState.animateScrollToItem(total - 1)
+                (if (cloudSyncIssue != null) 1 else 0) +
+                1 // bottom spacer item
+            val targetIndex = (if (totalItems > 0) totalItems - 1 else fallbackTotal - 1).coerceAtLeast(0)
+            if (turnsCount > 0 && !listState.canScrollForward) {
+                runCatching { listState.animateScrollToItem(targetIndex) }
+            } else if (turnsCount in 1..2) {
+                runCatching { listState.animateScrollToItem(targetIndex) }
             }
         }
     }
@@ -758,6 +768,11 @@ fun NexusMainScreen(
                 onOpenExecutionEnvironment = {
                     viewModel.refreshExecutionEnvironment()
                     showEnvironmentSetupScreen = true
+                },
+                isSyncing = isSyncing,
+                hasSyncIssue = (cloudSyncIssue != null),
+                onManualSyncClick = {
+                    viewModel.triggerManualSync()
                 }
             )
 
@@ -1322,7 +1337,9 @@ fun NexusMainScreen(
                                                     key = { it.id }
                                                 ) { turn ->
                                                     Column(
-                                                        modifier = Modifier.fillMaxWidth(),
+                                                        modifier = Modifier
+                                                            .fillMaxWidth()
+                                                            .animateItem(),
                                                         verticalArrangement = Arrangement.spacedBy(10.dp)
                                                     ) {
                                                         // 1. User Message (top-right pill bubble)
@@ -1589,9 +1606,9 @@ fun NexusMainScreen(
                         SmallFloatingActionButton(
                             onClick = {
                                 scope.launch {
-                                    val total = entries.size + (if (streamingText != null) 1 else 0)
+                                    val total = listState.layoutInfo.totalItemsCount
                                     if (total > 0) {
-                                        listState.animateScrollToItem(total - 1)
+                                        runCatching { listState.animateScrollToItem(total - 1) }
                                     }
                                 }
                             },
@@ -1617,7 +1634,9 @@ fun NexusMainScreen(
                 showDirectoryDialog || showEnvironmentSetupScreen || showJobsSheet
             if (viewMode != NexusViewMode.DASHBOARD && !isOverlayOpen) {
                 Column(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom)),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     NexusActiveJobsStatusChip(
@@ -1671,8 +1690,7 @@ fun NexusMainScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .windowInsetsPadding(WindowInsets.safeDrawing)
-            .imePadding()
+            .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal + WindowInsetsSides.Top))
     ) {
         val isExpandedScreen = maxWidth >= 840.dp
 
@@ -2142,7 +2160,10 @@ private fun NexusEditorialTopBar(
     onExportCurrentChatMarkdown: () -> Unit = {},
     onExportCurrentChatJson: () -> Unit = {},
     onRequestClearChat: () -> Unit = {},
-    onOpenExecutionEnvironment: () -> Unit = {}
+    onOpenExecutionEnvironment: () -> Unit = {},
+    isSyncing: Boolean = false,
+    hasSyncIssue: Boolean = false,
+    onManualSyncClick: () -> Unit = {}
 ) {
     var showTopOverflowMenu by remember { mutableStateOf(false) }
 
@@ -2270,11 +2291,51 @@ private fun NexusEditorialTopBar(
             }
         }
 
-        // Right: Temporary Chat toggle icon + Chat top-bar overflow menu (Export MD/JSON, Execution Env, Clear chat)
+        // Right: Manual Sync button + Temporary Chat toggle icon + Chat top-bar overflow menu
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
+            if (!isGuestMode) {
+                Surface(
+                    onClick = onManualSyncClick,
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isSyncing) {
+                        NexusAccent.copy(alpha = 0.14f)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f)
+                    },
+                    border = BorderStroke(
+                        1.dp,
+                        when {
+                            isSyncing -> NexusAccent.copy(alpha = 0.55f)
+                            hasSyncIssue -> NexusWarn.copy(alpha = 0.65f)
+                            else -> MaterialTheme.colorScheme.outline
+                        }
+                    ),
+                    modifier = Modifier
+                        .size(40.dp)
+                        .testTag("top_bar_manual_sync_button")
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        if (isSyncing) {
+                            CircularProgressIndicator(
+                                strokeWidth = 1.8.dp,
+                                color = NexusAccent,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.Sync,
+                                contentDescription = "Sync now",
+                                tint = if (hasSyncIssue) NexusWarn else MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
             Surface(
                 onClick = onToggleTemporaryChat,
                 shape = RoundedCornerShape(12.dp),
@@ -2323,6 +2384,23 @@ private fun NexusEditorialTopBar(
                     expanded = showTopOverflowMenu,
                     onDismissRequest = { showTopOverflowMenu = false }
                 ) {
+                    if (!isGuestMode) {
+                        DropdownMenuItem(
+                            text = { Text("Sync now", style = MaterialTheme.typography.bodyMedium) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Default.Sync,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            },
+                            onClick = {
+                                showTopOverflowMenu = false
+                                onManualSyncClick()
+                            },
+                            modifier = Modifier.testTag("top_menu_sync_now")
+                        )
+                    }
                     DropdownMenuItem(
                         text = { Text("Export Markdown", style = MaterialTheme.typography.bodyMedium) },
                         leadingIcon = {

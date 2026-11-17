@@ -146,5 +146,28 @@ To capture crash logs or runtime output via Wireless Debugging:
    - `AppNavigation` safely resolves `Firebase.auth` via `runCatching { Firebase.auth }.getOrNull()`, falling back to guest mode rather than throwing `IllegalStateException: Default FirebaseApp is not initialized`.
 
 3. **Redacted Crash Reporter**:
-   - If an unhandled exception occurs on any thread, `installRedactedUncaughtExceptionHandler()` intercepts it, redacts all secrets, writes a recovery summary to `SharedPreferences`, and displays a recovery banner on the subsequent launch.
+   - If an unhandled exception occurs on any thread, `installRedactedUncaughtExceptionHandler()` intercepts it, redacts all secrets, writes a recovery recovery summary to `SharedPreferences`, and displays a recovery banner on the subsequent launch.
+
+---
+
+## 9. Local Pre-Push Syntax Hook & GitHub Actions APK CI
+
+### Fast Local Pre-Push Check
+Run the local pre-push check before pushing to GitHub:
+```bash
+# Fast syntax, conflict marker, and invariant guard (<1s)
+./scripts/pre-push-check.sh
+
+# Full local Kotlin compiler check (filters output strictly to exact e: File.kt:line:col errors)
+./scripts/pre-push-check.sh --compile
+```
+
+### GitHub Actions Cloud Build (`.github/workflows/android-cli.yml`)
+Every push to `master` / `main` (or manual `workflow_dispatch`) triggers the 5-stage diagnostic pipeline:
+1. **Stage 1**: `./gradlew verifyFirebaseConfig`
+2. **Stage 2**: `:llama:assembleRelease` native CMake build cached via `ccache`
+3. **Stage 3**: `:app:compileDebugKotlin --continue` with automatic `^e:` compiler error extraction into the GitHub Actions Job Summary
+4. **Stage 4**: `./gradlew testDebugUnitTest`
+5. **Stage 5**: `./gradlew assembleDebug` + 16 KB ELF page alignment verification + uploads the `zelkai-debug-apk` artifact (`app-debug.apk`).
+
 

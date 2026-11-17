@@ -6,6 +6,7 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
+import com.example.data.local.LocalTranscriptStore
 import com.example.data.model.NexusSession
 import com.example.data.model.NexusUserSettings
 import com.example.data.model.TranscriptEntry
@@ -115,11 +116,13 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.io.File
@@ -784,17 +787,68 @@ class NexusViewModel(
     private val _cloudSyncIssue = MutableStateFlow<String?>(null)
     val cloudSyncIssue: StateFlow<String?> = _cloudSyncIssue.asStateFlow()
 
-    /** Bumped by [retryCloudSync] to re-subscribe Firestore listeners. */
+    /** Bumped by [retryCloudSync] / [triggerManualSync] to re-subscribe or sync Firestore. */
     private val _syncRetryTick = MutableStateFlow(0)
 
-    /** Last known good data per session, used as a local-first fallback when listeners fail. */
+    /** Circuit breaker & throttling state to prevent rapid sub-second sync retry loops and UI flickering. */
+    private val _syncCircuitOpen = MutableStateFlow(false)
+    private val _isSyncing = MutableStateFlow(false)
+    val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
+    private val _lastSyncTimestampMs = MutableStateFlow(0L)
+    val lastSyncTimestampMs: StateFlow<Long> = _lastSyncTimestampMs.asStateFlow()
+
+    /** Local persistent JSON store so sessions and AI responses survive restarts and offline/permission errors. */
+    private val localTranscriptStore = LocalTranscriptStore(appContext)
+
+    /** Reactive local entry state per session, used as local-first authority when listeners fail or lag. */
     private val localEntryMirror = ConcurrentHashMap<String, List<TranscriptEntry>>()
+    private val _localEntriesFlow = MutableStateFlow<Map<String, List<TranscriptEntry>>>(emptyMap())
     @Volatile
     private var localSessionMirror: List<NexusSession> = emptyList()
 
-    fun retryCloudSync() {
+    private fun updateLocalEntries(sessionId: String, entries: List<TranscriptEntry>) {
+        if (sessionId.isBlank()) return
+        val sorted = entries.sortedBy { it.sequence }
+        localEntryMirror[sessionId] = sorted
+        _localEntriesFlow.update { it + (sessionId to sorted) }
+        localTranscriptStore.saveEntries(sessionId, sorted)
+    }
+
+    private fun mergeEntriesPreservingLocal(
+        remote: List<TranscriptEntry>,
+        local: List<TranscriptEntry>,
+        truncatedIds: Set<String>
+    ): List<TranscriptEntry> {
+        val remoteFiltered = if (truncatedIds.isEmpty()) remote else remote.filter { it.id !in truncatedIds }
+        val localFiltered = if (truncatedIds.isEmpty()) local else local.filter { it.id !in truncatedIds }
+        if (remoteFiltered.isEmpty()) return localFiltered
+        if (localFiltered.isEmpty()) return remoteFiltered
+        val remoteIds = remoteFiltered.map { it.id }.toSet()
+        val unsyncedLocal = localFiltered.filter { loc ->
+            loc.id !in remoteIds && remoteFiltered.none { rem ->
+                rem.sequence == loc.sequence && rem.type == loc.type && rem.text == loc.text && rem.command == loc.command
+            }
+        }
+        return (remoteFiltered + unsyncedLocal).sortedWith(
+            compareBy<TranscriptEntry> { it.sequence }
+                .thenBy { it.createdAt?.seconds ?: 0L }
+        )
+    }
+
+    fun triggerManualSync() {
+        _isSyncing.value = true
+        _syncCircuitOpen.value = false
         _cloudSyncIssue.value = null
+        _lastSyncTimestampMs.value = System.currentTimeMillis()
         _syncRetryTick.update { it + 1 }
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(650L)
+            _isSyncing.value = false
+        }
+    }
+
+    fun retryCloudSync() {
+        triggerManualSync()
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -803,16 +857,25 @@ class NexusViewModel(
             _guestSessions.map<List<NexusSession>, UiState<List<NexusSession>>> { UiState.Success(it) }
         } else {
             _syncRetryTick.flatMapLatest {
-                repository.observeSessions()
-                    .map<List<NexusSession>, UiState<List<NexusSession>>> { list ->
-                        localSessionMirror = list
-                        UiState.Success(list)
-                    }
-                    .catch { e ->
-                        Log.w(TAG, "Session listener failed (${e.javaClass.simpleName}); using local sessions")
-                        _cloudSyncIssue.value = "Not synced"
-                        emit(UiState.Success(localSessionMirror))
-                    }
+                if (_syncCircuitOpen.value) {
+                    flowOf(UiState.Success(localSessionMirror))
+                } else {
+                    repository.observeSessions()
+                        .map<List<NexusSession>, UiState<List<NexusSession>>> { list ->
+                            val remoteIds = list.map { it.id }.toSet()
+                            val preservedLocal = localSessionMirror.filter { it.id !in remoteIds }
+                            val combined = list + preservedLocal
+                            localSessionMirror = combined
+                            localTranscriptStore.saveSessions(currentUserId, combined)
+                            UiState.Success(combined)
+                        }
+                        .catch { e ->
+                            Log.w(TAG, "Session listener failed (${e.javaClass.simpleName}); using local sessions")
+                            _syncCircuitOpen.value = true
+                            _cloudSyncIssue.value = "Not synced"
+                            emit(UiState.Success(localSessionMirror))
+                        }
+                }
             }
         },
         _pinnedSessionIds,
@@ -825,15 +888,18 @@ class NexusViewModel(
                 val enriched = merged
                     .filter { !it.isTemporary && it.id != TEMP_SESSION_ID }
                     .map { it.copy(isPinned = it.id in pinnedIds) }
+                localTranscriptStore.saveSessions(currentUserId, enriched)
                 UiState.Success(enriched)
             }
             else -> state
         }
-    }.stateIn(
-        scope = viewModelScope,
-        started = SharingStarted.Eagerly,
-        initialValue = if (isGuestMode || repository == null) UiState.Success(_guestSessions.value) else UiState.Loading
-    )
+    }
+        .distinctUntilChanged()
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = if (isGuestMode || repository == null) UiState.Success(_guestSessions.value) else UiState.Loading
+        )
 
     private fun resolveApprovalsFromEntries(entries: List<TranscriptEntry>) {
         entries.forEach { entry ->
@@ -869,29 +935,41 @@ class NexusViewModel(
                         UiState.Success(entries)
                     }
                 }
-                _localDraftSessions.value.any { it.id == sessionId } -> {
-                    // Lazy draft: not stored remotely until the first message, so there is nothing to observe.
-                    flowOf<UiState<List<TranscriptEntry>>>(UiState.Success(localEntryMirror[sessionId].orEmpty()))
-                }
-                else -> {
-                    combine(
-                        repository.observeEntries(sessionId),
-                        _optimisticallyTruncatedIds
-                    ) { entries, truncatedIds ->
-                        val filtered = if (truncatedIds.isEmpty()) entries else entries.filter { it.id !in truncatedIds }
-                        localEntryMirror[sessionId] = filtered
+                _localDraftSessions.value.any { it.id == sessionId } || _syncCircuitOpen.value -> {
+                    combine(_localEntriesFlow, _optimisticallyTruncatedIds) { localMap, truncatedIds ->
+                        val raw = localMap[sessionId] ?: localEntryMirror[sessionId] ?: localTranscriptStore.loadEntries(sessionId)
+                        val filtered = if (truncatedIds.isEmpty()) raw else raw.filter { it.id !in truncatedIds }
                         resolveApprovalsFromEntries(filtered)
                         UiState.Success(filtered) as UiState<List<TranscriptEntry>>
                     }
+                }
+                else -> {
+                    val remoteFlow = repository.observeEntries(sessionId)
                         .catch { e ->
-                            // Never replace the chat with a full-screen error: degrade to local data.
+                            // Never replace the chat with a full-screen error: degrade to local data and open circuit breaker.
                             Log.w(TAG, "Transcript listener failed (${e.javaClass.simpleName}); using local entries")
+                            _syncCircuitOpen.value = true
                             _cloudSyncIssue.value = "Not synced"
-                            emit(UiState.Success(localEntryMirror[sessionId].orEmpty()))
+                            emit(localEntryMirror[sessionId].orEmpty())
                         }
+                    combine(
+                        remoteFlow,
+                        _localEntriesFlow,
+                        _optimisticallyTruncatedIds
+                    ) { remoteEntries, localMap, truncatedIds ->
+                        val localForSession = localMap[sessionId] ?: localEntryMirror[sessionId].orEmpty()
+                        val merged = mergeEntriesPreservingLocal(remoteEntries, localForSession, truncatedIds)
+                        if (merged != localForSession) {
+                            localEntryMirror[sessionId] = merged
+                            localTranscriptStore.saveEntries(sessionId, merged)
+                        }
+                        resolveApprovalsFromEntries(merged)
+                        UiState.Success(merged) as UiState<List<TranscriptEntry>>
+                    }
                 }
             }
         }
+        .distinctUntilChanged()
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.Eagerly,
@@ -899,6 +977,9 @@ class NexusViewModel(
         )
 
     init {
+        // Restore persisted local sessions and entries immediately on startup to prevent session mixing
+        restoreLocalPersistenceOnStartup()
+
         // Keep _settings synchronized with DataStore selectedProvider & selectedModelId
         viewModelScope.launch {
             combine(selectedProvider, selectedModelId) { prov, mod -> prov to mod }
@@ -1851,12 +1932,76 @@ class NexusViewModel(
         )
     }
 
+    private fun restoreLocalPersistenceOnStartup() {
+        if (isGuestMode) {
+            val savedGuestSessions = localTranscriptStore.loadSessions("guest")
+            if (savedGuestSessions.isNotEmpty()) {
+                _guestSessions.value = savedGuestSessions
+                val activeId = localTranscriptStore.loadActiveSessionId("guest") ?: savedGuestSessions.first().id
+                _activeSessionId.value = activeId
+                val entries = localTranscriptStore.loadEntries(activeId)
+                if (entries.isNotEmpty()) {
+                    _guestEntries.value = entries
+                }
+            }
+            return
+        }
+        val savedSessions = localTranscriptStore.loadSessions(currentUserId)
+        if (savedSessions.isNotEmpty()) {
+            localSessionMirror = savedSessions
+            val restoredMap = mutableMapOf<String, List<TranscriptEntry>>()
+            savedSessions.forEach { sess ->
+                val entries = localTranscriptStore.loadEntries(sess.id)
+                if (entries.isNotEmpty()) {
+                    localEntryMirror[sess.id] = entries
+                    restoredMap[sess.id] = entries
+                }
+                if (sess.id.startsWith("draft_")) {
+                    _localDraftSessions.update { list -> if (list.any { it.id == sess.id }) list else list + sess }
+                }
+            }
+            if (restoredMap.isNotEmpty()) {
+                _localEntriesFlow.value = restoredMap
+            }
+            val savedActive = localTranscriptStore.loadActiveSessionId(currentUserId)
+            val resolvedActive = if (savedActive != null && savedSessions.any { it.id == savedActive }) {
+                savedActive
+            } else {
+                savedSessions.first().id
+            }
+            _activeSessionId.value = resolvedActive
+            _settings.update { it.copy(activeSessionId = resolvedActive) }
+        } else {
+            // Create a unique isolated local draft session on first launch instead of sharing "default_session"
+            val initialDraftId = "draft_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+            val initialDraft = NexusSession(
+                id = initialDraftId,
+                userId = currentUserId,
+                title = "New chat",
+                status = "idle",
+                cwd = shellBridge.currentCwd,
+                provider = NexusToolAndRedactor.providerDisplayLabel(selectedProvider.value),
+                model = selectedModelId.value
+            )
+            _localDraftSessions.value = listOf(initialDraft)
+            localSessionMirror = listOf(initialDraft)
+            localEntryMirror[initialDraftId] = emptyList()
+            _localEntriesFlow.update { it + (initialDraftId to emptyList()) }
+            _activeSessionId.value = initialDraftId
+            _settings.update { it.copy(activeSessionId = initialDraftId) }
+            localTranscriptStore.saveSessions(currentUserId, listOf(initialDraft))
+            localTranscriptStore.saveActiveSessionId(currentUserId, initialDraftId)
+        }
+    }
+
     private fun observeSettingsAndBootstrapSession() {
         val repo = repository ?: return
         viewModelScope.launch {
             repo.observeUserSettings()
                 .catch { e ->
-                    Log.e(TAG, "Failed to observe user settings", e)
+                    Log.w(TAG, "User settings listener failed (${e.javaClass.simpleName}); keeping local settings")
+                    _syncCircuitOpen.value = true
+                    _cloudSyncIssue.value = "Not synced"
                 }
                 .collect { remoteSettings ->
                     if (remoteSettings != null) {
@@ -1886,16 +2031,26 @@ class NexusViewModel(
                             provider = authoritativeProvider,
                             selectedModel = authoritativeModel
                         )
-                        if (remoteSettings.activeSessionId.isNotBlank() && !_isRunning.value && !_isTemporaryChat.value) {
+                        // Only adopt remote activeSessionId if we don't already have an active local session with messages
+                        val currentLocalId = _activeSessionId.value
+                        val hasLocalEntries = localEntryMirror[currentLocalId].orEmpty().isNotEmpty()
+                        if (
+                            remoteSettings.activeSessionId.isNotBlank() &&
+                            remoteSettings.activeSessionId != "default_session" &&
+                            !hasLocalEntries &&
+                            !_isRunning.value &&
+                            !_isTemporaryChat.value
+                        ) {
                             _activeSessionId.value = remoteSettings.activeSessionId
+                            localTranscriptStore.saveActiveSessionId(currentUserId, remoteSettings.activeSessionId)
                         }
-                    } else {
+                    } else if (!_syncCircuitOpen.value) {
                         val pCfg = personalizationStore.config.value
                         val initial = NexusUserSettings(
                             userId = currentUserId,
                             provider = selectedProvider.value,
                             selectedModel = selectedModelId.value,
-                            activeSessionId = "default_session",
+                            activeSessionId = _activeSessionId.value.ifBlank { "default_session" },
                             inputHistory = listOf("sh ./system-check.sh", "ls -la", "cat logs/agent-audit.log"),
                             displayName = pCfg.displayName,
                             avatarDataUri = pCfg.avatarDataUri,
@@ -1911,29 +2066,56 @@ class NexusViewModel(
                             recentWorkspaces = pCfg.recentWorkspaces
                         )
                         _settings.value = initial
-                        repo.ensureOrSaveUserSettings(initial)
+                        val saveRes = repo.ensureOrSaveUserSettings(initial)
+                        if (saveRes.isFailure) {
+                            _syncCircuitOpen.value = true
+                            _cloudSyncIssue.value = "Not synced"
+                        }
                     }
                 }
+        }
+
+        // Throttled 60-second background sync loop (never retries every second)
+        viewModelScope.launch {
+            while (isActive) {
+                kotlinx.coroutines.delay(60_000L)
+                val elapsed = System.currentTimeMillis() - _lastSyncTimestampMs.value
+                if (elapsed >= 60_000L && !_isRunning.value && _cloudSyncIssue.value != null) {
+                    _lastSyncTimestampMs.value = System.currentTimeMillis()
+                    _syncCircuitOpen.value = false
+                    _syncRetryTick.update { it + 1 }
+                }
+            }
         }
 
         viewModelScope.launch {
             sessionsState.collect { state ->
                 if (state is UiState.Success && state.data.isEmpty()) {
-                    val createRes = repo.createSession(
-                        title = "New chat",
-                        cwd = shellBridge.currentCwd,
-                        provider = NexusToolAndRedactor.providerDisplayLabel(selectedProvider.value),
-                        model = selectedModelId.value,
-                        sessionId = "default_session"
-                    )
-                    if (createRes.isSuccess) {
-                        _activeSessionId.value = "default_session"
+                    // Create a local isolated draft session instead of triggering a continuous remote createSession loop
+                    if (_localDraftSessions.value.isEmpty()) {
+                        val draftId = "draft_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+                        val draft = NexusSession(
+                            id = draftId,
+                            userId = currentUserId,
+                            title = "New chat",
+                            status = "idle",
+                            cwd = shellBridge.currentCwd,
+                            provider = NexusToolAndRedactor.providerDisplayLabel(selectedProvider.value),
+                            model = selectedModelId.value
+                        )
+                        _localDraftSessions.value = listOf(draft)
+                        localSessionMirror = listOf(draft)
+                        updateLocalEntries(draftId, emptyList())
+                        _activeSessionId.value = draftId
+                        localTranscriptStore.saveSessions(currentUserId, listOf(draft))
+                        localTranscriptStore.saveActiveSessionId(currentUserId, draftId)
                         _currentWorkingDir.value = shellBridge.currentCwd
                     }
                 } else if (state is UiState.Success && state.data.isNotEmpty() && !_isTemporaryChat.value) {
                     val currentId = _activeSessionId.value
                     val activeSess = state.data.find { it.id == currentId } ?: state.data.first().also {
                         _activeSessionId.value = it.id
+                        localTranscriptStore.saveActiveSessionId(currentUserId, it.id)
                     }
                     // Amendment #7: Migrate existing sessions without a projectSlug to Unassigned;
                     // resolve project path per device from projectSlug + storageLocation.
@@ -1944,7 +2126,7 @@ class NexusViewModel(
                     if (!_isRunning.value) {
                         if (sessSlug.isNotBlank()) {
                             val resolvedDevicePath = activeSess.resolvedProjectPath()
-                            if (sessStorage == "shared") {
+                            if (sessStorage == "shared" || sessStorage == "shared_storage") {
                                 val folderExists = File(resolvedDevicePath).exists()
                                 _isBoundProjectMissing.value = !folderExists
                                 if (folderExists) {
@@ -2415,12 +2597,55 @@ class NexusViewModel(
                 title = title,
                 reasoningText = reasoningText,
                 thinkingDurationSec = thinkingDurationSec,
-                jobId = jobId
+                jobId = jobId,
+                createdAt = Timestamp.now(),
+                updatedAt = Timestamp.now()
             )
-            _guestEntries.update { it + newEntry }
+            _guestEntries.update {
+                val updated = it + newEntry
+                localTranscriptStore.saveEntries(sessionId, updated)
+                updated
+            }
+            localTranscriptStore.saveSessions("guest", _guestSessions.value)
             return Result.success(newId)
         }
-        return repository.appendEntry(
+
+        // Local-first write: immediately store in localEntryMirror + _localEntriesFlow + disk before cloud sync
+        val localId = "local_entry_${UUID.randomUUID().toString().replace("-", "").take(12)}"
+        val nowTs = Timestamp.now()
+        val optimisticEntry = TranscriptEntry(
+            id = localId,
+            userId = currentUserId,
+            sessionId = sessionId,
+            type = type,
+            text = text,
+            command = command,
+            reason = reason,
+            commandStatus = commandStatus,
+            isRisky = isRisky,
+            timeoutSec = timeoutSec,
+            cwd = cwd,
+            exitCode = exitCode,
+            output = output,
+            redactions = redactions,
+            noticeKind = noticeKind,
+            sequence = sequence,
+            title = title,
+            reasoningText = reasoningText,
+            thinkingDurationSec = thinkingDurationSec,
+            jobId = jobId,
+            createdAt = nowTs,
+            updatedAt = nowTs
+        )
+        val existingLocal = localEntryMirror[sessionId].orEmpty()
+        updateLocalEntries(sessionId, existingLocal + optimisticEntry)
+
+        if (_syncCircuitOpen.value || sessionId.startsWith("draft_")) {
+            _cloudSyncIssue.value = "Not synced"
+            return Result.success(localId)
+        }
+
+        val remoteRes = repository.appendEntry(
             sessionId = sessionId,
             type = type,
             sequence = sequence,
@@ -2440,6 +2665,19 @@ class NexusViewModel(
             thinkingDurationSec = thinkingDurationSec.takeIf { it > 0 },
             jobId = jobId.takeIf { it.isNotBlank() }
         )
+        return remoteRes.fold(
+            onSuccess = { remoteId ->
+                val current = localEntryMirror[sessionId].orEmpty()
+                val reconciled = current.map { if (it.id == localId) it.copy(id = remoteId) else it }
+                updateLocalEntries(sessionId, reconciled)
+                Result.success(remoteId)
+            },
+            onFailure = {
+                _syncCircuitOpen.value = true
+                _cloudSyncIssue.value = "Not synced"
+                Result.success(localId)
+            }
+        )
     }
 
     private suspend fun updateEntryStatusOrLocal(
@@ -2455,20 +2693,38 @@ class NexusViewModel(
         }
         if (isGuestMode || repository == null) {
             _guestEntries.update { list ->
-                list.map { if (it.id == entryId) it.copy(commandStatus = commandStatus) else it }
+                val updated = list.map { if (it.id == entryId) it.copy(commandStatus = commandStatus) else it }
+                localTranscriptStore.saveEntries(sessionId, updated)
+                updated
             }
             return
         }
-        repository.updateEntryTextOrStatus(
-            sessionId = sessionId,
-            entryId = entryId,
-            commandStatus = commandStatus
-        )
+        val currentLocal = localEntryMirror[sessionId].orEmpty()
+        val updatedLocal = currentLocal.map { if (it.id == entryId) it.copy(commandStatus = commandStatus) else it }
+        updateLocalEntries(sessionId, updatedLocal)
+        resolveApprovalsFromEntries(updatedLocal)
+
+        if (!_syncCircuitOpen.value && !sessionId.startsWith("draft_") && !entryId.startsWith("local_entry_")) {
+            val res = repository.updateEntryTextOrStatus(
+                sessionId = sessionId,
+                entryId = entryId,
+                commandStatus = commandStatus
+            )
+            if (res.isFailure) {
+                _syncCircuitOpen.value = true
+                _cloudSyncIssue.value = "Not synced"
+            }
+        }
     }
 
     private suspend fun saveUserSettingsOrLocal(updatedSettings: NexusUserSettings) {
-        if (isGuestMode || _isTemporaryChat.value || repository == null) return
-        repository.ensureOrSaveUserSettings(updatedSettings)
+        localTranscriptStore.saveActiveSessionId(currentUserId, updatedSettings.activeSessionId)
+        if (isGuestMode || _isTemporaryChat.value || repository == null || _syncCircuitOpen.value) return
+        val res = repository.ensureOrSaveUserSettings(updatedSettings)
+        if (res.isFailure) {
+            _syncCircuitOpen.value = true
+            _cloudSyncIssue.value = "Not synced"
+        }
     }
 
     fun dismissLiveNotificationBanner() {
@@ -3182,6 +3438,7 @@ class NexusViewModel(
         if (_isRunning.value) stopRunningAgent()
         _isTemporaryChat.value = false
         _activeSessionId.value = sessionId
+        localTranscriptStore.saveActiveSessionId(currentUserId, sessionId)
         val updated = _settings.value.copy(activeSessionId = sessionId)
         _settings.value = updated
         viewModelScope.launch {
@@ -3201,15 +3458,17 @@ class NexusViewModel(
     fun createNewSession(customTitle: String = "", requestedAdditionalChat: Boolean = false) {
         if (_isRunning.value) stopRunningAgent()
         _isTemporaryChat.value = false
-        _streamingText.value = ""
+        _streamingText.value = null
         if (isGuestMode) {
             val hasMessages = _guestEntries.value.any { it.type == "user" }
             if (requestedAdditionalChat && hasMessages) {
                 _showGuestChatLimitDialog.value = true
             }
+            val activeGuestId = _activeSessionId.value.ifBlank { "guest_session_1" }
             _guestEntries.value = emptyList()
+            localTranscriptStore.deleteSessionEntries(activeGuestId)
             _guestSessions.update { list ->
-                list.map {
+                val updated = list.map {
                     it.copy(
                         title = customTitle.trim().ifBlank { "New chat" },
                         status = "idle",
@@ -3220,6 +3479,8 @@ class NexusViewModel(
                         updatedAt = Timestamp.now()
                     )
                 }
+                localTranscriptStore.saveSessions("guest", updated)
+                updated
             }
             return
         }
@@ -3243,14 +3504,17 @@ class NexusViewModel(
             status = "idle",
             cwd = freshCwd,
             provider = NexusToolAndRedactor.providerDisplayLabel(selectedProvider.value),
-            model = selectedModelId.value
+            model = selectedModelId.value,
+            createdAt = Timestamp.now(),
+            updatedAt = Timestamp.now()
         )
         // Drop any other untouched drafts so the sidebar never fills with empty chats.
         _localDraftSessions.update { list ->
             list.filter { d -> localEntryMirror[d.id].orEmpty().any { it.type == "user" } } + draft
         }
-        localEntryMirror[draftId] = emptyList()
+        updateLocalEntries(draftId, emptyList())
         _activeSessionId.value = draftId
+        localTranscriptStore.saveActiveSessionId(currentUserId, draftId)
         _settings.update { it.copy(activeSessionId = draftId) }
     }
 
@@ -3263,6 +3527,10 @@ class NexusViewModel(
         val sessionId = _activeSessionId.value
         val draft = _localDraftSessions.value.firstOrNull { it.id == sessionId } ?: return sessionId
         val repo = repository ?: return sessionId
+        if (_syncCircuitOpen.value) {
+            _cloudSyncIssue.value = "Not synced"
+            return sessionId
+        }
         val res = repo.createSession(
             title = draft.title,
             cwd = draft.cwd,
@@ -3271,9 +3539,16 @@ class NexusViewModel(
         )
         return res.fold(
             onSuccess = { newId ->
+                val carriedEntries = localEntryMirror.remove(sessionId).orEmpty()
                 _localDraftSessions.update { list -> list.filterNot { it.id == sessionId } }
-                localEntryMirror.remove(sessionId)
+                if (carriedEntries.isNotEmpty()) {
+                    updateLocalEntries(newId, carriedEntries.map { it.copy(sessionId = newId) })
+                } else {
+                    updateLocalEntries(newId, emptyList())
+                }
+                localTranscriptStore.deleteSessionEntries(sessionId)
                 _activeSessionId.value = newId
+                localTranscriptStore.saveActiveSessionId(currentUserId, newId)
                 val updated = _settings.value.copy(
                     provider = selectedProvider.value,
                     selectedModel = selectedModelId.value,
@@ -3285,6 +3560,7 @@ class NexusViewModel(
             },
             onFailure = { e ->
                 Log.w(TAG, "Draft session sync failed (${e.javaClass.simpleName})")
+                _syncCircuitOpen.value = true
                 _cloudSyncIssue.value = "Not synced"
                 sessionId
             }
@@ -3332,8 +3608,9 @@ class NexusViewModel(
                 }
                 isGuestMode || repository == null -> {
                     _guestEntries.value = emptyList()
+                    localTranscriptStore.deleteSessionEntries(sessionId)
                     _guestSessions.update { list ->
-                        list.map {
+                        val updated = list.map {
                             it.copy(
                                 title = "New chat",
                                 status = "idle",
@@ -3344,19 +3621,25 @@ class NexusViewModel(
                                 model = activeModId
                             )
                         }
+                        localTranscriptStore.saveSessions("guest", updated)
+                        updated
                     }
                 }
                 else -> {
-                    repository.clearSessionEntries(sessionId)
-                    repository.updateSessionStatusAndStats(
-                        sessionId = sessionId,
-                        status = "idle",
-                        cwd = cwd,
-                        commandsCount = 0L,
-                        redactionsCount = 0L,
-                        provider = activeProvLabel,
-                        model = activeModId
-                    )
+                    updateLocalEntries(sessionId, emptyList())
+                    localTranscriptStore.deleteSessionEntries(sessionId)
+                    if (!_syncCircuitOpen.value && !sessionId.startsWith("draft_")) {
+                        repository.clearSessionEntries(sessionId)
+                        repository.updateSessionStatusAndStats(
+                            sessionId = sessionId,
+                            status = "idle",
+                            cwd = cwd,
+                            commandsCount = 0L,
+                            redactionsCount = 0L,
+                            provider = activeProvLabel,
+                            model = activeModId
+                        )
+                    }
                 }
             }
         }
@@ -3374,7 +3657,11 @@ class NexusViewModel(
         val currentList = when {
             _isTemporaryChat.value -> _temporaryEntries.value
             isGuestMode || repository == null -> _guestEntries.value
-            else -> (entriesState.value as? UiState.Success)?.data.orEmpty()
+            else -> {
+                val stateEntries = (entriesState.value as? UiState.Success)?.data.orEmpty()
+                val localEntries = localEntryMirror[activeEffectiveSessionId()].orEmpty()
+                if (localEntries.size > stateEntries.size) localEntries else stateEntries
+            }
         }
         return (currentList.maxOfOrNull { it.sequence } ?: 0L) + 1L
     }
@@ -3383,6 +3670,7 @@ class NexusViewModel(
         if (_isTemporaryChat.value) return _temporarySession.value
         val list = (sessionsState.value as? UiState.Success)?.data.orEmpty()
         return list.find { it.id == _activeSessionId.value }
+            ?: _localDraftSessions.value.find { it.id == _activeSessionId.value }
     }
 
     private suspend fun syncCurrentSessionStats(
@@ -3421,7 +3709,7 @@ class NexusViewModel(
 
         if (isGuestMode || repository == null) {
             _guestSessions.update { list ->
-                list.map { sess ->
+                val updated = list.map { sess ->
                     if (sess.id == sessionId) {
                         sess.copy(
                             status = status,
@@ -3437,22 +3725,66 @@ class NexusViewModel(
                         )
                     } else sess
                 }
+                localTranscriptStore.saveSessions("guest", updated)
+                updated
             }
             return
         }
 
-        repository.updateSessionStatusAndStats(
-            sessionId = sessionId,
-            status = status,
-            cwd = effectiveCwd,
-            commandsCount = (cur?.commandsCount ?: 0L) + addCommands,
-            redactionsCount = (cur?.redactionsCount ?: 0L) + addRedactions,
-            provider = activeProvLabel,
-            model = activeModId,
-            title = updatedTitle,
-            projectSlug = _activeProjectSlug.value,
-            storageLocation = _activeProjectStorageLocation.value
-        )
+        // Update local draft or mirrored session immediately
+        _localDraftSessions.update { list ->
+            list.map { sess ->
+                if (sess.id == sessionId) {
+                    sess.copy(
+                        status = status,
+                        cwd = effectiveCwd,
+                        projectSlug = _activeProjectSlug.value,
+                        storageLocation = _activeProjectStorageLocation.value,
+                        commandsCount = sess.commandsCount + addCommands,
+                        redactionsCount = sess.redactionsCount + addRedactions,
+                        provider = activeProvLabel,
+                        model = activeModId,
+                        title = updatedTitle ?: sess.title,
+                        updatedAt = Timestamp.now()
+                    )
+                } else sess
+            }
+        }
+        localSessionMirror = localSessionMirror.map { sess ->
+            if (sess.id == sessionId) {
+                sess.copy(
+                    status = status,
+                    cwd = effectiveCwd,
+                    projectSlug = _activeProjectSlug.value,
+                    storageLocation = _activeProjectStorageLocation.value,
+                    commandsCount = sess.commandsCount + addCommands,
+                    redactionsCount = sess.redactionsCount + addRedactions,
+                    provider = activeProvLabel,
+                    model = activeModId,
+                    title = updatedTitle ?: sess.title,
+                    updatedAt = Timestamp.now()
+                )
+            } else sess
+        }
+
+        if (!_syncCircuitOpen.value && !sessionId.startsWith("draft_")) {
+            val res = repository.updateSessionStatusAndStats(
+                sessionId = sessionId,
+                status = status,
+                cwd = effectiveCwd,
+                commandsCount = (cur?.commandsCount ?: 0L) + addCommands,
+                redactionsCount = (cur?.redactionsCount ?: 0L) + addRedactions,
+                provider = activeProvLabel,
+                model = activeModId,
+                title = updatedTitle,
+                projectSlug = _activeProjectSlug.value,
+                storageLocation = _activeProjectStorageLocation.value
+            )
+            if (res.isFailure) {
+                _syncCircuitOpen.value = true
+                _cloudSyncIssue.value = "Not synced"
+            }
+        }
     }
 
     /**
@@ -3980,10 +4312,9 @@ class NexusViewModel(
             }
 
             val fullRawText = accumulated.toString()
-            _streamingText.value = null
             logPipelineStage(
                 stage = "1_MODEL_OUTPUT",
-                detail = "step=${step + 1}/$maxSteps, provider=$activeProv, model=$activeMod, chars=${fullRawText.length}, preview='${fullRawText.take(160)}'"
+                detail = "step=${step + 1}/$maxSteps, provider=$activeProv, model=$activeMod, chars=${fullRawText.length}"
             )
 
             val parseResult = ToolCallParser.parse(
@@ -4002,6 +4333,7 @@ class NexusViewModel(
 
             when (outcome) {
                 is GenerationOutcome.NoTokens -> {
+                    _streamingText.value = null
                     if (activeProv == "local" && !retriedNoTokens) {
                         retriedNoTokens = true
                         logPipelineStage("RETRY_NO_TOKENS", "Resetting native engine and retrying once")
@@ -4031,6 +4363,7 @@ class NexusViewModel(
                         thinkingDurationSec = thinkingDuration,
                         cwd = _currentWorkingDir.value
                     )
+                    _streamingText.value = null
                     workingEntries.add(
                         TranscriptEntry(
                             id = agentRes.getOrNull() ?: "local_agent_${step}_$agentSeq",
@@ -4077,6 +4410,7 @@ class NexusViewModel(
                         noticeKind = "error",
                         cwd = _currentWorkingDir.value
                     )
+                    _streamingText.value = null
                     return
                 }
 
@@ -4096,6 +4430,7 @@ class NexusViewModel(
                             thinkingDurationSec = thinkingDuration,
                             cwd = _currentWorkingDir.value
                         )
+                        _streamingText.value = null
                         workingEntries.add(
                             TranscriptEntry(
                                 id = agentRes.getOrNull() ?: "local_agent_${step}_$agentSeq",
@@ -4110,6 +4445,7 @@ class NexusViewModel(
                             )
                         )
                     } else {
+                        _streamingText.value = null
                         logPipelineStage("DROP_AT_EMPTY_MODEL_OUTPUT", "Model returned blank text")
                         appendEntryOrLocal(
                             sessionId = sessionId,
@@ -4150,6 +4486,7 @@ class NexusViewModel(
                             thinkingDurationSec = thinkingDuration,
                             cwd = _currentWorkingDir.value
                         )
+                        _streamingText.value = null
                         workingEntries.add(
                             TranscriptEntry(
                                 id = agentRes.getOrNull() ?: "local_agent_${step}_$agentSeq",
@@ -4163,6 +4500,8 @@ class NexusViewModel(
                                 sequence = agentSeq
                             )
                         )
+                    } else {
+                        _streamingText.value = null
                     }
 
                     // Handle Write File tool action

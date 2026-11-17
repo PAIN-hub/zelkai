@@ -16,4 +16,9 @@
 local.properties
 .env
 debug.keystore
+*.jks
+*.mp4
+third_party/
+.agents/
+.vscode/
 *-debug.log

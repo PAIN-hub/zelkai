@@ -8,8 +8,10 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -341,7 +343,12 @@ fun ChatComposer(
                             }
                         }
 
-                        if (attachedFileLabel != null) {
+                        val currentFileLabel = attachedFileLabel
+                        AnimatedVisibility(
+                            visible = currentFileLabel != null,
+                            enter = fadeIn(tween(180)) + expandHorizontally(tween(180)),
+                            exit = fadeOut(tween(140)) + shrinkHorizontally(tween(140))
+                        ) {
                             Surface(
                                 onClick = { attachedFileLabel = null },
                                 shape = RoundedCornerShape(999.dp),
@@ -360,7 +367,7 @@ fun ChatComposer(
                                         modifier = Modifier.size(12.dp)
                                     )
                                     Text(
-                                        text = attachedFileLabel!!,
+                                        text = currentFileLabel.orEmpty(),
                                         style = MaterialTheme.typography.labelSmall,
                                         color = NexusAccent,
                                         maxLines = 1,

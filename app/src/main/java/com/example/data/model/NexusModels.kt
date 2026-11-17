@@ -68,7 +68,7 @@ data class NexusSession(
     fun resolvedProjectPath(): String {
         val clean = projectSlug.trim()
         if (clean.isEmpty()) return "/storage/emulated/0/Nexus"
-        return if (storageLocation == "termux_home") {
+        return if (storageLocation == "termux_home" || storageLocation == "termux_home_mirrored") {
             "/data/data/com.termux/files/home/nexus_workspace/$clean"
         } else {
             "/storage/emulated/0/Nexus/$clean"
