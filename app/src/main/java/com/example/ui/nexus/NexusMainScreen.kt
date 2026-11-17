@@ -1380,10 +1380,90 @@ fun NexusMainScreen(
                                                                     )
                                                                 }
                                                                 is TimelineBlock.TextBlock -> {
-                                                                    MarkdownMessageContent(
-                                                                        markdown = block.markdownText,
-                                                                        isStreaming = turn.isLiveTurn && block.blockId == "live_text"
-                                                                    )
+                                                                    val isStreamingBlock = turn.isLiveTurn && block.blockId == "live_text"
+                                                                    Column(
+                                                                        modifier = Modifier.fillMaxWidth(),
+                                                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                                                    ) {
+                                                                        MarkdownMessageContent(
+                                                                            markdown = block.markdownText,
+                                                                            isStreaming = isStreamingBlock
+                                                                        )
+                                                                        if (!isStreamingBlock && block.markdownText.isNotBlank()) {
+                                                                            val agentEntry = turn.assistantEntries.lastOrNull { it.type == "agent" }
+                                                                            val currentFeedback = agentEntry?.let { messageFeedback[it.id] }
+                                                                            Row(
+                                                                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                                                                verticalAlignment = Alignment.CenterVertically,
+                                                                                modifier = Modifier.padding(top = 2.dp)
+                                                                            ) {
+                                                                                Surface(
+                                                                                    onClick = {
+                                                                                        clipboard.setText(androidx.compose.ui.text.AnnotatedString(block.markdownText))
+                                                                                    },
+                                                                                    shape = RoundedCornerShape(8.dp),
+                                                                                    color = Color.Transparent,
+                                                                                    modifier = Modifier.size(32.dp)
+                                                                                ) {
+                                                                                    Box(contentAlignment = Alignment.Center) {
+                                                                                        Icon(
+                                                                                            imageVector = LucideIcons.Copy,
+                                                                                            contentDescription = "Copy response",
+                                                                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                                            modifier = Modifier.size(15.dp)
+                                                                                        )
+                                                                                    }
+                                                                                }
+                                                                                if (agentEntry != null) {
+                                                                                    Surface(
+                                                                                        onClick = { viewModel.regenerateFromEntry(agentEntry) },
+                                                                                        shape = RoundedCornerShape(8.dp),
+                                                                                        color = Color.Transparent,
+                                                                                        modifier = Modifier.size(32.dp)
+                                                                                    ) {
+                                                                                        Box(contentAlignment = Alignment.Center) {
+                                                                                            Icon(
+                                                                                                imageVector = LucideIcons.Sync,
+                                                                                                contentDescription = "Regenerate response",
+                                                                                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                                                modifier = Modifier.size(15.dp)
+                                                                                            )
+                                                                                        }
+                                                                                    }
+                                                                                    Surface(
+                                                                                        onClick = { viewModel.toggleMessageFeedback(agentEntry.id, "up") },
+                                                                                        shape = RoundedCornerShape(8.dp),
+                                                                                        color = if (currentFeedback == "up") NexusAccent.copy(alpha = 0.12f) else Color.Transparent,
+                                                                                        modifier = Modifier.size(32.dp)
+                                                                                    ) {
+                                                                                        Box(contentAlignment = Alignment.Center) {
+                                                                                            Icon(
+                                                                                                imageVector = LucideIcons.ThumbsUp,
+                                                                                                contentDescription = "Helpful",
+                                                                                                tint = if (currentFeedback == "up") NexusAccent else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                                                modifier = Modifier.size(15.dp)
+                                                                                            )
+                                                                                        }
+                                                                                    }
+                                                                                    Surface(
+                                                                                        onClick = { viewModel.toggleMessageFeedback(agentEntry.id, "down") },
+                                                                                        shape = RoundedCornerShape(8.dp),
+                                                                                        color = if (currentFeedback == "down") NexusDanger.copy(alpha = 0.12f) else Color.Transparent,
+                                                                                        modifier = Modifier.size(32.dp)
+                                                                                    ) {
+                                                                                        Box(contentAlignment = Alignment.Center) {
+                                                                                            Icon(
+                                                                                                imageVector = LucideIcons.ThumbsDown,
+                                                                                                contentDescription = "Not helpful",
+                                                                                                tint = if (currentFeedback == "down") NexusDanger else MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                                                modifier = Modifier.size(15.dp)
+                                                                                            )
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
                                                                 }
                                                                 is TimelineBlock.ToolGroup -> {
                                                                     ToolGroupRow(
@@ -2526,7 +2606,7 @@ private fun CompactGuestLimitToast(
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = Icons.Default.Close,
+                    imageVector = LucideIcons.Close,
                     contentDescription = "Dismiss guest notice",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(13.dp)
@@ -2682,7 +2762,7 @@ private fun CompactNotificationToast(
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
-                    imageVector = Icons.Default.Close,
+                    imageVector = LucideIcons.Close,
                     contentDescription = "Dismiss notification",
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(14.dp)

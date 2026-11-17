@@ -109,6 +109,7 @@ import com.example.ui.theme.NexusDanger
 import com.example.ui.theme.NexusDangerSoft
 import com.example.ui.theme.NexusOk
 import com.example.ui.theme.NexusOkSoft
+import com.example.ui.theme.NexusThemeTokens
 import com.example.ui.theme.NexusWarn
 import com.example.ui.theme.PoppinsFontFamily
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
@@ -248,7 +249,7 @@ fun AuthScreen(
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
     val credentialManager = remember { CredentialManager.create(context) }
-    val isDark = isSystemInDarkTheme()
+    val isDark = NexusThemeTokens.colors.isDark
 
     // Editorial Palette: Warm off-white (#F7F6F3) in light, near-black (#0B0D11) in dark
     val bgColor = if (isDark) Color(0xFF0B0D11) else Color(0xFFF7F6F3)
@@ -1094,7 +1095,7 @@ private fun InlineAuthAlert(
  */
 @Composable
 fun NexusLogoIcon(modifier: Modifier = Modifier) {
-    val isDark = isSystemInDarkTheme()
+    val isDark = NexusThemeTokens.colors.isDark
     val logoRes = if (isDark) R.drawable.zelkai_logo_dark else R.drawable.zelkai_logo_light
     Image(
         painter = painterResource(id = logoRes),

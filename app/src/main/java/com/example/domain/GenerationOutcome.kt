@@ -38,10 +38,11 @@ sealed interface GenerationOutcome {
     data class Error(val message: String) : GenerationOutcome { override val isError get() = true }
 
     companion object {
-        private val THINK_BLOCK = Regex("(?s)<think>.*?(</think>|$)")
-        private val SH_EXEC_FENCE = Regex("(?s)```sh-exec[^\\n]*\\n.*?(\\n```|$)")
-        private val NEXUS_FILE = Regex("(?s)<nexus:file\\b[^>]*>.*?(</nexus:file>|$)")
-        private val NEXUS_TOOL = Regex("(?s)<nexus_tool\\b[^>]*>.*?(</nexus_tool>|$)|<nexus_tool\\b[^>]*/>")
+        private val THINK_BLOCK_CLOSED = Regex("(?s)<think>.*?</think>")
+        private val SH_EXEC_FENCE_CLOSED = Regex("(?s)```sh-exec[^\\n]*\\n.*?\\n```")
+        private val NEXUS_FILE_CLOSED = Regex("(?s)<nexus:file\\b[^>]*>.*?</nexus:file>")
+        private val NEXUS_TOOL_CLOSED = Regex("(?s)<nexus_tool\\b[^>]*>.*?</nexus_tool>|<nexus_tool\\b[^>]*/>")
+        private val THINK_BLOCK_ANY = Regex("(?s)<think>.*?(</think>|$)")
 
         /**
          * Pure classifier. [finishReason] uses provider-normalised values:
@@ -66,7 +67,7 @@ sealed interface GenerationOutcome {
                 return PromptTooLong(promptTokens, nCtx)
             }
 
-            val reasoning = THINK_BLOCK.findAll(rawText).sumOf {
+            val reasoning = THINK_BLOCK_ANY.findAll(rawText).sumOf {
                 it.value.removePrefix("<think>").removeSuffix("</think>").trim().length
             }
             val visible = stripForDisplay(rawText)
@@ -85,10 +86,12 @@ sealed interface GenerationOutcome {
 
         fun stripForDisplay(raw: String): String {
             return raw
-                .replace(THINK_BLOCK, "")
-                .replace(SH_EXEC_FENCE, "")
-                .replace(NEXUS_FILE, "")
-                .replace(NEXUS_TOOL, "")
+                .replace(THINK_BLOCK_CLOSED, "")
+                .replace(SH_EXEC_FENCE_CLOSED, "")
+                .replace(NEXUS_FILE_CLOSED, "")
+                .replace(NEXUS_TOOL_CLOSED, "")
+                .replace("<think>", "")
+                .replace("</think>", "")
                 .trim()
         }
 

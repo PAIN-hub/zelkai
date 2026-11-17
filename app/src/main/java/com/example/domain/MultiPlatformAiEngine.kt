@@ -3,6 +3,7 @@ package com.example.domain
 import com.example.data.model.TranscriptEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -294,9 +295,22 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
 
             if (normProvider == "local") {
                 val trimmedEntries = trimEntriesForLocalBudget(entries)
-                val resolvedPrompt = trimmedEntries.lastOrNull { it.type == "user" }?.text?.trim()
+                val priorTurns = trimmedEntries.dropLastWhile { it.type != "user" }
+                val latestUser = priorTurns.lastOrNull { it.type == "user" }?.text?.trim()
                     ?.takeIf { it.isNotEmpty() }
                     ?: latestUserPrompt
+                val historyPrefix = priorTurns.dropLast(1)
+                    .filter { it.type == "user" || it.type == "agent" }
+                    .takeLast(6)
+                    .joinToString("\n") { entry ->
+                        val roleLabel = if (entry.type == "user") "User" else "Zelkai"
+                        "$roleLabel: ${entry.text.take(400)}"
+                    }
+                val resolvedPrompt = if (historyPrefix.isNotBlank()) {
+                    "Recent context:\n$historyPrefix\n\nCurrent request:\n$latestUser"
+                } else {
+                    latestUser
+                }
 
                 val compactSystemPrompt = buildCompactLocalSystemInstruction(currentCwd = currentCwd)
 
@@ -448,9 +462,15 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
 
+    @Volatile
+    var lastFinishReason: String = "eos"
+        private set
+
     fun setHttpClientForTesting(client: OkHttpClient) {
         this.streamingHttpClient = client
     }
+
+    internal fun defaultTransportPublicForTest(): ProviderTransport = defaultTransport
 
     private val defaultTransport = object : ProviderTransport {
         override fun streamGeminiRest(
@@ -586,9 +606,9 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
         streamCompletion(
             provider = normProvider,
             modelId = modelId,
-            maxTokens = 1024L,
+            maxTokens = 4096L,
             entries = singleEntry,
-            personaPrompt = "You are a concise Linux CLI security and DevOps assistant. Format answers in clean Markdown.",
+            personaPrompt = "You are Zelkai, a concise Linux CLI security and DevOps assistant. Format answers in clean Markdown.",
             currentCwd = currentCwd,
             fallbackUserPrompt = prompt
         ).collect { chunk ->
@@ -615,7 +635,7 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
                 modelId = cleanId,
                 statusCode = 408,
                 kind = ProviderErrorKind.TIMEOUT,
-                userMessage = "$label request timed out after 30s. Check your connection and retry."
+                userMessage = "$label request timed out after 120s. Check your connection and retry."
             )
             is UnknownHostException -> ProviderApiException(
                 provider = provider,
@@ -856,23 +876,121 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
             provider = "gemini",
             modelId = cleanModelId,
             request = req
-        ) { chunkJson ->
-            parseGeminiCandidateChunk(chunkJson)
+        ) { chunkJson, acc ->
+            parseGeminiCandidateChunk(chunkJson, acc)
         }
     }.flowOn(Dispatchers.IO)
 
-    private fun parseGeminiCandidateChunk(json: JSONObject): Pair<String, ToolCall?> {
+    private class SseStreamAccumulator {
+        var finishReason: String = "eos"
+        var pendingToolName: String = ""
+        val pendingToolArgs = StringBuilder()
+        var isThinkingOpen: Boolean = false
+
+        fun buildToolCallIfReady(source: String): ToolCall? {
+            if (pendingToolName.isBlank()) return null
+            val rawArgs = pendingToolArgs.toString().trim().ifEmpty { "{}" }
+            val argsJson = runCatching { JSONObject(rawArgs) }.getOrNull() ?: return null
+            val name = pendingToolName
+            pendingToolName = ""
+            pendingToolArgs.setLength(0)
+            return parseNativeFunctionCallStatic(name, argsJson, source)
+        }
+
+        private fun parseNativeFunctionCallStatic(fnName: String, args: JSONObject, source: String): ToolCall {
+            return when (fnName) {
+                "write_file" -> {
+                    val path = args.optString("path", "").trim()
+                    val content = args.optString("content", "")
+                    val cmd = "write_file $path"
+                    ToolCall(
+                        command = cmd,
+                        reason = "Write file $path",
+                        timeoutSec = 30L,
+                        riskLevel = ToolCallParser.classifyRisk(cmd),
+                        source = source,
+                        actionKind = ToolActionKind.WRITE_FILE,
+                        targetFilePath = path,
+                        targetFileContent = content
+                    )
+                }
+                "start_job" -> {
+                    val rawCmd = args.optString("command", "").trim()
+                    val fullCmd = if (rawCmd.startsWith("start_job")) rawCmd else "start_job $rawCmd"
+                    ToolCall(
+                        command = fullCmd,
+                        reason = args.optString("reason", "Start background job"),
+                        timeoutSec = 10L,
+                        riskLevel = ToolCallParser.classifyRisk(fullCmd),
+                        source = source
+                    )
+                }
+                "job_status" -> {
+                    val jobId = args.optString("job_id", "").trim()
+                    val fullCmd = "job_status $jobId"
+                    ToolCall(command = fullCmd, reason = "Check background job status", timeoutSec = 10L, riskLevel = CommandRiskLevel.LOW, source = source)
+                }
+                "job_logs" -> {
+                    val jobId = args.optString("job_id", "").trim()
+                    val lines = args.optInt("lines", 30).coerceIn(1, 200)
+                    val fullCmd = "job_logs $jobId $lines"
+                    ToolCall(command = fullCmd, reason = "Read background job logs", timeoutSec = 10L, riskLevel = CommandRiskLevel.LOW, source = source)
+                }
+                "stop_job" -> {
+                    val jobId = args.optString("job_id", "").trim()
+                    val fullCmd = "stop_job $jobId"
+                    ToolCall(command = fullCmd, reason = "Stop background job", timeoutSec = 10L, riskLevel = CommandRiskLevel.LOW, source = source)
+                }
+                else -> {
+                    val cmd = args.optString("command", "").trim()
+                    val reason = args.optString("reason", "").trim()
+                    val timeout = args.optLong("timeoutSec", 30L).coerceIn(2L, 300L)
+                    ToolCall(
+                        command = cmd,
+                        reason = reason,
+                        timeoutSec = timeout,
+                        riskLevel = ToolCallParser.classifyRisk(cmd),
+                        source = source
+                    )
+                }
+            }
+        }
+    }
+
+    private fun parseGeminiCandidateChunk(json: JSONObject, acc: SseStreamAccumulator? = null): Pair<String, ToolCall?> {
+        val promptFeedback = json.optJSONObject("promptFeedback")
+        val blockReason = promptFeedback?.optString("blockReason", "").orEmpty()
+        if (blockReason.isNotBlank()) {
+            acc?.finishReason = GenerationOutcome.normalizeCloudFinishReason(blockReason)
+        }
         val candidates = json.optJSONArray("candidates")
         val firstCandidate = candidates?.optJSONObject(0)
+        val rawFinish = firstCandidate?.optString("finishReason", "").orEmpty()
+        if (rawFinish.isNotBlank()) {
+            acc?.finishReason = GenerationOutcome.normalizeCloudFinishReason(rawFinish)
+        }
         val parts = firstCandidate?.optJSONObject("content")?.optJSONArray("parts")
         val sb = StringBuilder()
         var nativeToolCall: ToolCall? = null
         if (parts != null) {
             for (i in 0 until parts.length()) {
                 val partObj = parts.optJSONObject(i) ?: continue
+                val isThought = partObj.optBoolean("thought", false)
                 val partText = partObj.optString("text", "")
                 if (partText.isNotEmpty()) {
-                    sb.append(partText)
+                    if (isThought) {
+                        if (acc != null && !acc.isThinkingOpen) {
+                            sb.append("<think>")
+                            acc.isThinkingOpen = true
+                        }
+                        sb.append(partText)
+                    } else {
+                        if (acc != null && acc.isThinkingOpen) {
+                            sb.append("</think>\n")
+                            acc.isThinkingOpen = false
+                        }
+                        sb.append(partText)
+                    }
                 }
                 val fnCall = partObj.optJSONObject("functionCall")
                 if (fnCall != null && nativeToolCall == null) {
@@ -974,17 +1092,77 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
             provider = "anthropic",
             modelId = modelId,
             request = req
-        ) { chunkJson ->
-            parseAnthropicChunk(chunkJson)
+        ) { chunkJson, acc ->
+            parseAnthropicChunk(chunkJson, acc)
         }
     }.flowOn(Dispatchers.IO)
 
-    private fun parseAnthropicChunk(json: JSONObject): Pair<String, ToolCall?> {
+    private fun parseAnthropicChunk(json: JSONObject, acc: SseStreamAccumulator? = null): Pair<String, ToolCall?> {
         val eventType = json.optString("type", "")
-        if (eventType == "content_block_delta") {
-            val delta = json.optJSONObject("delta")
-            if (delta?.optString("type") == "text_delta") {
-                return delta.optString("text", "") to null
+        when (eventType) {
+            "content_block_start" -> {
+                val block = json.optJSONObject("content_block")
+                if (block?.optString("type") == "tool_use") {
+                    acc?.pendingToolName = block.optString("name", "execute_shell_command")
+                    acc?.pendingToolArgs?.setLength(0)
+                    val initialInput = block.optJSONObject("input")
+                    if (initialInput != null && initialInput.length() > 0) {
+                        acc?.pendingToolArgs?.append(initialInput.toString())
+                    }
+                }
+                return "" to null
+            }
+            "content_block_delta" -> {
+                val delta = json.optJSONObject("delta") ?: return "" to null
+                return when (delta.optString("type")) {
+                    "text_delta" -> {
+                        val prefix = if (acc != null && acc.isThinkingOpen) {
+                            acc.isThinkingOpen = false
+                            "</think>\n"
+                        } else ""
+                        (prefix + delta.optString("text", "")) to null
+                    }
+                    "thinking_delta" -> {
+                        val thinking = delta.optString("thinking", "")
+                        if (thinking.isEmpty()) return "" to null
+                        val prefix = if (acc != null && !acc.isThinkingOpen) {
+                            acc.isThinkingOpen = true
+                            "<think>"
+                        } else ""
+                        (prefix + thinking) to null
+                    }
+                    "input_json_delta" -> {
+                        acc?.pendingToolArgs?.append(delta.optString("partial_json", ""))
+                        "" to null
+                    }
+                    else -> "" to null
+                }
+            }
+            "content_block_stop" -> {
+                val toolCall = acc?.buildToolCallIfReady("anthropic-native")
+                val suffix = if (acc != null && acc.isThinkingOpen) {
+                    acc.isThinkingOpen = false
+                    "</think>\n"
+                } else ""
+                return suffix to toolCall
+            }
+            "message_delta" -> {
+                val stopReason = json.optJSONObject("delta")?.optString("stop_reason", "").orEmpty()
+                if (stopReason.isNotBlank()) {
+                    acc?.finishReason = GenerationOutcome.normalizeCloudFinishReason(stopReason)
+                }
+                return "" to null
+            }
+            "error" -> {
+                val errMsg = json.optJSONObject("error")?.optString("message", "Anthropic stream error")
+                    ?: "Anthropic stream error"
+                throw ProviderApiException(
+                    provider = "anthropic",
+                    modelId = "",
+                    statusCode = 502,
+                    kind = ProviderErrorKind.SERVER_ERROR,
+                    userMessage = errMsg
+                )
             }
         }
         val contentArr = json.optJSONArray("content")
@@ -1004,6 +1182,10 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
                     }
                 }
             }
+        }
+        val stopReason = json.optString("stop_reason", "")
+        if (stopReason.isNotBlank()) {
+            acc?.finishReason = GenerationOutcome.normalizeCloudFinishReason(stopReason)
         }
         return sb.toString() to nativeToolCall
     }
@@ -1113,36 +1295,67 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
             provider = "openai",
             modelId = modelId,
             request = req
-        ) { chunkJson ->
-            parseOpenAiChunk(chunkJson)
+        ) { chunkJson, acc ->
+            parseOpenAiChunk(chunkJson, acc)
         }
     }.flowOn(Dispatchers.IO)
 
-    private fun parseOpenAiChunk(json: JSONObject): Pair<String, ToolCall?> {
+    private fun parseOpenAiChunk(json: JSONObject, acc: SseStreamAccumulator? = null): Pair<String, ToolCall?> {
         val choices = json.optJSONArray("choices")
         val firstChoice = choices?.optJSONObject(0) ?: return "" to null
+        val finishReason = firstChoice.optString("finish_reason", "")
+        if (finishReason.isNotBlank() && finishReason != "null") {
+            acc?.finishReason = GenerationOutcome.normalizeCloudFinishReason(finishReason)
+        }
 
         val delta = firstChoice.optJSONObject("delta")
         if (delta != null) {
-            val deltaContent = delta.optString("content", "")
+            val sb = StringBuilder()
+            val reasoningContent = if (delta.has("reasoning_content") && !delta.isNull("reasoning_content")) {
+                delta.optString("reasoning_content", "")
+            } else ""
+            if (reasoningContent.isNotEmpty()) {
+                if (acc != null && !acc.isThinkingOpen) {
+                    sb.append("<think>")
+                    acc.isThinkingOpen = true
+                }
+                sb.append(reasoningContent)
+            }
+            val deltaContent = if (delta.has("content") && !delta.isNull("content")) {
+                delta.optString("content", "")
+            } else ""
+            if (deltaContent.isNotEmpty()) {
+                if (acc != null && acc.isThinkingOpen) {
+                    sb.append("</think>\n")
+                    acc.isThinkingOpen = false
+                }
+                sb.append(deltaContent)
+            }
+
             val toolCalls = delta.optJSONArray("tool_calls")
             var nativeToolCall: ToolCall? = null
             if (toolCalls != null && toolCalls.length() > 0) {
                 val fn = toolCalls.optJSONObject(0)?.optJSONObject("function")
-                val fnName = fn?.optString("name", "execute_shell_command").orEmpty()
-                val argsRaw = fn?.optString("arguments", "").orEmpty()
-                if (argsRaw.isNotEmpty()) {
-                    val argsJson = runCatching { JSONObject(argsRaw) }.getOrNull()
+                val fnName = if (fn != null && fn.has("name") && !fn.isNull("name")) fn.optString("name", "") else ""
+                val argsFrag = if (fn != null && fn.has("arguments") && !fn.isNull("arguments")) fn.optString("arguments", "") else ""
+                if (acc != null) {
+                    if (fnName.isNotBlank()) acc.pendingToolName = fnName
+                    if (argsFrag.isNotEmpty()) acc.pendingToolArgs.append(argsFrag)
+                    nativeToolCall = acc.buildToolCallIfReady("openai-native")
+                } else if (argsFrag.isNotEmpty()) {
+                    val argsJson = runCatching { JSONObject(argsFrag) }.getOrNull()
                     if (argsJson != null) {
-                        nativeToolCall = parseNativeFunctionCall(fnName, argsJson, "openai-native")
+                        nativeToolCall = parseNativeFunctionCall(fnName.ifBlank { "execute_shell_command" }, argsJson, "openai-native")
                     }
                 }
             }
-            return deltaContent to nativeToolCall
+            return sb.toString() to nativeToolCall
         }
 
         val firstMsg = firstChoice.optJSONObject("message") ?: return "" to null
-        val contentText = firstMsg.optString("content", "")
+        val contentText = if (firstMsg.has("content") && !firstMsg.isNull("content")) {
+            firstMsg.optString("content", "")
+        } else ""
         val toolCalls = firstMsg.optJSONArray("tool_calls")
         var nativeToolCall: ToolCall? = null
         if (toolCalls != null && toolCalls.length() > 0) {
@@ -1159,16 +1372,18 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
         provider: String,
         modelId: String,
         request: Request,
-        chunkParser: (JSONObject) -> Pair<String, ToolCall?>
+        chunkParser: (JSONObject, SseStreamAccumulator) -> Pair<String, ToolCall?>
     ) {
         var attempt = 0
         val maxAttempts = 3
         var lastError: ProviderApiException? = null
+        lastFinishReason = "eos"
 
         while (attempt < maxAttempts) {
             attempt++
             currentCoroutineContext().ensureActive()
             val call = streamingHttpClient.newCall(request)
+            var emittedAnyText = false
             try {
                 call.execute().use { resp ->
                     if (!resp.isSuccessful) {
@@ -1181,9 +1396,12 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
                             rawBody = rawErr,
                             retryAfterHeader = retryHeader
                         )
-                        if (mapped.kind == ProviderErrorKind.SERVER_ERROR && attempt < maxAttempts) {
+                        val isRetryable = mapped.kind == ProviderErrorKind.SERVER_ERROR ||
+                            mapped.kind == ProviderErrorKind.RATE_LIMITED
+                        if (isRetryable && attempt < maxAttempts) {
                             lastError = mapped
-                            Thread.sleep(150L * attempt)
+                            val delayMs = (mapped.retryAfterSeconds?.times(1000L) ?: (300L * attempt)).coerceIn(200L, 5000L)
+                            delay(delayMs)
                             return@use
                         }
                         throw mapped
@@ -1192,7 +1410,7 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
                     val reader = resp.body?.charStream()?.buffered()
                         ?: throw mapHttpFailure(provider, modelId, 502, "", null)
 
-                    var emittedAnyText = false
+                    val acc = SseStreamAccumulator()
                     var capturedToolCall: ToolCall? = null
                     val nonSseLines = StringBuilder()
                     var sawSseDataLine = false
@@ -1206,7 +1424,7 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
                                 val dataPayload = trimmed.removePrefix("data:").trim()
                                 if (dataPayload.isEmpty() || dataPayload == "[DONE]") continue
                                 val json = runCatching { JSONObject(dataPayload) }.getOrNull() ?: continue
-                                val (textPart, toolCall) = chunkParser(json)
+                                val (textPart, toolCall) = chunkParser(json, acc)
                                 if (textPart.isNotEmpty()) {
                                     emittedAnyText = true
                                     emit(textPart)
@@ -1227,7 +1445,7 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
                             if (arr != null) {
                                 for (i in 0 until arr.length()) {
                                     val item = arr.optJSONObject(i) ?: continue
-                                    val (textPart, toolCall) = chunkParser(item)
+                                    val (textPart, toolCall) = chunkParser(item, acc)
                                     if (textPart.isNotEmpty()) {
                                         emittedAnyText = true
                                         emit(textPart)
@@ -1240,7 +1458,7 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
                         } else if (fullBody.startsWith("{")) {
                             val json = runCatching { JSONObject(fullBody) }.getOrNull()
                             if (json != null) {
-                                val (textPart, toolCall) = chunkParser(json)
+                                val (textPart, toolCall) = chunkParser(json, acc)
                                 if (textPart.isNotEmpty()) {
                                     emittedAnyText = true
                                     emit(textPart)
@@ -1251,6 +1469,16 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
                             }
                         }
                     }
+
+                    if (acc.isThinkingOpen) {
+                        acc.isThinkingOpen = false
+                        emit("</think>\n")
+                    }
+
+                    if (capturedToolCall == null) {
+                        capturedToolCall = acc.buildToolCallIfReady("$provider-native")
+                    }
+                    lastFinishReason = acc.finishReason
 
                     if (capturedToolCall != null) {
                         val toolBlock = ToolCallParser.formatNormalizedToolCallBlock(capturedToolCall!!, "")
@@ -1263,9 +1491,12 @@ Android Environment Constraints: no sudo, no apt/apt-get (use `pkg install -y` i
             } catch (e: Throwable) {
                 currentCoroutineContext().ensureActive()
                 val mapped = mapNetworkException(provider, modelId, e)
-                if (mapped.kind == ProviderErrorKind.SERVER_ERROR && attempt < maxAttempts) {
+                val retryable = (mapped.kind == ProviderErrorKind.SERVER_ERROR ||
+                    mapped.kind == ProviderErrorKind.RATE_LIMITED ||
+                    (mapped.kind == ProviderErrorKind.TIMEOUT && !emittedAnyText))
+                if (retryable && attempt < maxAttempts) {
                     lastError = mapped
-                    Thread.sleep(150L * attempt)
+                    delay(300L * attempt)
                     continue
                 }
                 throw mapped

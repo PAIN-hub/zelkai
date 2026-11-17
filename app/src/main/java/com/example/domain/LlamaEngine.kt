@@ -607,16 +607,18 @@ plain-text ::= ([^`] | "`" [^`] | "``" [^`])+
             // Reuse KV cache for shared system prompt if supported by native binding
             val sys = params.systemInstruction.trim()
             val nativeHasTemplate = nativeEngine.hasChatTemplate()
+            var systemPromptAppliedNatively = false
             if (sys.isNotBlank() && nativeHasTemplate) {
-                runCatching {
+                systemPromptAppliedNatively = runCatching {
                     nativeEngine.setSystemPrompt(sys)
                     lastSystemPromptSent = sys
-                }
+                    true
+                }.getOrDefault(false)
             }
 
             // Format prompt with GGUF metadata chat_template when native template wasn't explicitly applied
             val meta = loadedMetadata
-            val effectiveUserMessage = if (nativeHasTemplate) {
+            val effectiveUserMessage = if (systemPromptAppliedNatively) {
                 prompt
             } else {
                 formatWithGgufChatTemplate(
@@ -691,7 +693,7 @@ plain-text ::= ([^`] | "`" [^`] | "``" [^`])+
                 }
 
                 val tail = decoder.flushRemaining()
-                if (tail.isNotEmpty() && !stopRequested) {
+                if (tail.isNotEmpty()) {
                     emit(tail)
                 }
             } catch (ce: CancellationException) {

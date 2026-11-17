@@ -1168,6 +1168,7 @@ class LocalLlmManager(private val context: Context) {
 
         val params = InferenceParams(
             contextLength = cfg.nCtx,
+            maxTokens = (cfg.nCtx / 2).coerceIn(512, 2048),
             threads = cfg.nThreads,
             threadsBatch = cfg.nThreadsBatch,
             batchSize = cfg.nBatch,

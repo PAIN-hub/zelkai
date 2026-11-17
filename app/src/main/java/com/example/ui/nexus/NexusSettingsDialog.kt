@@ -632,7 +632,7 @@ fun NexusSettingsDialog(
                 Button(
                     onClick = {
                         onResetSettings()
-                        onSelectThemeMode(NexusThemeMode.SYSTEM)
+                        onSelectThemeMode(NexusThemeMode.LIGHT)
                         showResetConfirmDialog = false
                         statusToastMessage = "Settings reset to defaults"
                     },

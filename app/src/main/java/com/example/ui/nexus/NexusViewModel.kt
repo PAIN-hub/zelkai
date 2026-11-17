@@ -2027,9 +2027,11 @@ class NexusViewModel(
                         )
                         val authoritativeProvider = selectedProvider.value
                         val authoritativeModel = selectedModelId.value
+                        val migratedPersona = NexusUserSettings.migrateLegacyNexusPromptIfUntouched(remoteSettings.agentPersona)
                         _settings.value = remoteSettings.copy(
                             provider = authoritativeProvider,
-                            selectedModel = authoritativeModel
+                            selectedModel = authoritativeModel,
+                            agentPersona = migratedPersona
                         )
                         // Only adopt remote activeSessionId if we don't already have an active local session with messages
                         val currentLocalId = _activeSessionId.value
@@ -4332,19 +4334,23 @@ class NexusViewModel(
 
             val parsedThinking = ThinkingTagParser.parse(fullRawText)
             val thinkingDuration = ((System.currentTimeMillis() - stepStartTime) / 1000L).coerceAtLeast(0L)
+            val resolvedFinishReason = when {
+                userRequestedStop -> "cancelled"
+                activeProv != "local" -> multiPlatformEngine.lastFinishReason
+                else -> "eos"
+            }
             val outcome = GenerationOutcome.classify(
                 rawText = fullRawText,
-                finishReason = if (userRequestedStop) "cancelled" else "eos",
+                finishReason = resolvedFinishReason,
                 toolCallCount = if (parseResult is ToolCallParseResult.Success) 1 else 0
             )
 
             when (outcome) {
                 is GenerationOutcome.NoTokens -> {
                     _streamingText.value = null
-                    if (activeProv == "local" && !retriedNoTokens) {
+                    if (!retriedNoTokens) {
                         retriedNoTokens = true
-                        logPipelineStage("RETRY_NO_TOKENS", "Resetting native engine and retrying once")
-                        localLlmManager.unloadActiveLocalModel()
+                        logPipelineStage("RETRY_NO_TOKENS", "Retrying once after empty model output (provider=$activeProv)")
                         continue
                     }
                     _agentStatus.value = AgentStatus.Error("Model returned no tokens")
@@ -4352,10 +4358,75 @@ class NexusViewModel(
                         sessionId = sessionId,
                         type = "notice",
                         sequence = nextSequence(),
-                        text = "Inference failed: Model returned an empty response. Tap Retry, Reload model, or switch to a cloud model.",
+                        text = "Inference failed: Model returned an empty response. Tap Retry, Reload model, or switch to another model.",
                         noticeKind = "error",
                         cwd = _currentWorkingDir.value
                     )
+                    return
+                }
+
+                is GenerationOutcome.Blocked -> {
+                    _streamingText.value = null
+                    _agentStatus.value = AgentStatus.Error("Blocked (${outcome.reason})")
+                    appendEntryOrLocal(
+                        sessionId = sessionId,
+                        type = "notice",
+                        sequence = nextSequence(),
+                        text = "Response blocked by model policy (${outcome.reason}). Try rephrasing your request.",
+                        noticeKind = "warn",
+                        cwd = _currentWorkingDir.value
+                    )
+                    return
+                }
+
+                is GenerationOutcome.PromptTooLong -> {
+                    _streamingText.value = null
+                    _agentStatus.value = AgentStatus.Error("Prompt too long")
+                    appendEntryOrLocal(
+                        sessionId = sessionId,
+                        type = "notice",
+                        sequence = nextSequence(),
+                        text = "Context limit exceeded (${outcome.promptTokens}/${outcome.nCtx} tokens). Start a New chat or shorten the prompt.",
+                        noticeKind = "error",
+                        cwd = _currentWorkingDir.value
+                    )
+                    return
+                }
+
+                is GenerationOutcome.BudgetConsumedByReasoning -> {
+                    val agentSeq = nextSequence()
+                    val agentRes = appendEntryOrLocal(
+                        sessionId = sessionId,
+                        type = "agent",
+                        sequence = agentSeq,
+                        text = fullRawText,
+                        reasoningText = parsedThinking.thinkingText,
+                        thinkingDurationSec = thinkingDuration,
+                        cwd = _currentWorkingDir.value
+                    )
+                    _streamingText.value = null
+                    workingEntries.add(
+                        TranscriptEntry(
+                            id = agentRes.getOrNull() ?: "local_agent_${step}_$agentSeq",
+                            userId = currentUserId,
+                            sessionId = sessionId,
+                            type = "agent",
+                            text = fullRawText,
+                            reasoningText = parsedThinking.thinkingText,
+                            thinkingDurationSec = thinkingDuration,
+                            cwd = _currentWorkingDir.value,
+                            sequence = agentSeq
+                        )
+                    )
+                    appendEntryOrLocal(
+                        sessionId = sessionId,
+                        type = "notice",
+                        sequence = nextSequence(),
+                        text = "Model used the token budget on reasoning (${outcome.reasoningChars} chars). Increase Max Tokens in Settings or tap Retry.",
+                        noticeKind = "warn",
+                        cwd = _currentWorkingDir.value
+                    )
+                    _agentStatus.value = AgentStatus.Idle
                     return
                 }
 
@@ -4408,6 +4479,20 @@ class NexusViewModel(
             when (parseResult) {
                 is ToolCallParseResult.ParseError -> {
                     logPipelineStage("2_DROP_AT_TOOL_CALL_PARSER", parseResult.message)
+                    val preservedVisible = GenerationOutcome.stripForDisplay(
+                        if (parsedThinking.thinkingText.isNotBlank()) parsedThinking.visibleText else fullRawText
+                    )
+                    if (preservedVisible.isNotBlank() || parsedThinking.thinkingText.isNotBlank()) {
+                        appendEntryOrLocal(
+                            sessionId = sessionId,
+                            type = "agent",
+                            sequence = nextSequence(),
+                            text = preservedVisible.ifBlank { fullRawText },
+                            reasoningText = parsedThinking.thinkingText,
+                            thinkingDurationSec = thinkingDuration,
+                            cwd = _currentWorkingDir.value
+                        )
+                    }
                     _agentStatus.value = AgentStatus.Error("Tool-call parse failed")
                     appendEntryOrLocal(
                         sessionId = sessionId,
@@ -5196,7 +5281,7 @@ class NexusViewModel(
             try {
                 val prompt = when (entry.type) {
                     "output" -> """
-                        Analyze this Linux shell command execution output from Nexus Agent v5:
+                        Analyze this Linux shell command execution output from Zelkai:
                         Command: ${entry.command.ifBlank { "(shell command)" }}
                         Working Directory: ${entry.cwd}
                         Exit Code: ${entry.exitCode}
@@ -5212,12 +5297,12 @@ class NexusViewModel(
                         Flagged Risky: ${entry.isRisky}
                     """.trimIndent()
                     else -> """
-                        Analyze this Nexus session entry and provide technical insights:
+                        Analyze this Zelkai session entry and provide technical insights:
                         ${entry.text}
                     """.trimIndent()
                 }
 
-                val markdownReply = withTimeout(60_000L) {
+                val markdownReply = withTimeout(120_000L) {
                     multiPlatformEngine.generateSingleTurnText(
                         provider = activeProv,
                         modelId = activeMod,
@@ -5230,7 +5315,7 @@ class NexusViewModel(
                     entryId = entry.id,
                     summary = markdownReply.lines().firstOrNull { it.isNotBlank() } ?: "Analysis complete.",
                     rootCauseOrImpact = markdownReply,
-                    securityNotes = if (entry.isRisky) "High-risk command flagged by Nexus security gate." else "No critical anomalies detected.",
+                    securityNotes = if (entry.isRisky) "High-risk command flagged by Zelkai security gate." else "No critical anomalies detected.",
                     suggestedCommand = ""
                 )
                 _activeAnalysis.value = analysis
