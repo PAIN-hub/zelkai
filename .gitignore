@@ -20,5 +20,7 @@ debug.keystore
 *.mp4
 third_party/
 .agents/
+.aistudio/
+public/
 .vscode/
 *-debug.log
