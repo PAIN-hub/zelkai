@@ -83,7 +83,7 @@ class EmptyResponseReliabilityUnitTest {
                     .setBody(sseBody)
             )
 
-            val chunks = MultiPlatformAiEngine.streamWithExplicitApiKey(
+            val chunks = MultiPlatformAiEngine.routeWithTransport(
                 provider = "openai",
                 modelId = "gpt-4o",
                 personalApiKey = "sk-test-key",
@@ -131,7 +131,7 @@ class EmptyResponseReliabilityUnitTest {
                     .setBody(sseBody)
             )
 
-            val chunks = MultiPlatformAiEngine.streamWithExplicitApiKey(
+            val chunks = MultiPlatformAiEngine.routeWithTransport(
                 provider = "anthropic",
                 modelId = "claude-sonnet-4-20250514",
                 personalApiKey = "sk-ant-test",
@@ -175,7 +175,7 @@ class EmptyResponseReliabilityUnitTest {
             }
         }
 
-        val out = MultiPlatformAiEngine.streamWithExplicitApiKey(
+        val out = MultiPlatformAiEngine.routeWithTransport(
             provider = "local",
             modelId = "qwen2.5-1.5b",
             personalApiKey = "",
