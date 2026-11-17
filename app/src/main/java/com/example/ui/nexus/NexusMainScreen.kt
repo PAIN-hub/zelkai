@@ -143,6 +143,7 @@ import com.example.domain.ProviderModelRepository
 import com.example.domain.UserApiKeyStore
 import com.example.ui.auth.signOutFromNexus
 import com.example.ui.theme.JetBrainsMonoFontFamily
+import com.example.ui.theme.LucideIcons
 import com.example.ui.theme.NexusAccent
 import com.example.ui.theme.NexusAccent2
 import com.example.ui.theme.NexusAccentSoftLight
@@ -845,7 +846,7 @@ fun NexusMainScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Terminal,
+                            imageVector = LucideIcons.Terminal,
                             contentDescription = null,
                             tint = NexusWarn,
                             modifier = Modifier.size(14.dp)
@@ -874,7 +875,7 @@ fun NexusMainScreen(
                                 .testTag("limited_shell_setup_button")
                         )
                         Icon(
-                            imageVector = Icons.Default.Close,
+                            imageVector = LucideIcons.Close,
                             contentDescription = "Dismiss limited shell notice",
                             tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier
@@ -950,7 +951,7 @@ fun NexusMainScreen(
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 Icon(
-                                    imageVector = Icons.Default.StopCircle,
+                                    imageVector = LucideIcons.StopCircle,
                                     contentDescription = "Stop background job",
                                     tint = NexusDanger,
                                     modifier = Modifier.size(12.dp)
@@ -1584,7 +1585,7 @@ fun NexusMainScreen(
                             ) {
                                 StatusDotIndicator(agentStatus = effectiveAgentStatus)
                                 Icon(
-                                    imageVector = Icons.Default.Terminal,
+                                    imageVector = LucideIcons.Terminal,
                                     contentDescription = "Track in Terminal",
                                     tint = NexusAccent,
                                     modifier = Modifier.size(14.dp)
@@ -1620,7 +1621,7 @@ fun NexusMainScreen(
                                 .testTag("jump_to_latest_fab")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.ArrowDownward,
+                                imageVector = LucideIcons.ArrowDown,
                                 contentDescription = "Jump to latest message",
                                 modifier = Modifier.size(18.dp)
                             )
@@ -2199,7 +2200,7 @@ private fun NexusEditorialTopBar(
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            imageVector = Icons.Default.Menu,
+                            imageVector = LucideIcons.Menu,
                             contentDescription = "Open navigation sidebar",
                             tint = MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.size(20.dp)
@@ -2228,7 +2229,7 @@ private fun NexusEditorialTopBar(
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            imageVector = Icons.Default.Edit,
+                            imageVector = LucideIcons.Edit,
                             contentDescription = "New chat",
                             tint = MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.size(18.dp)
@@ -2326,7 +2327,7 @@ private fun NexusEditorialTopBar(
                             )
                         } else {
                             Icon(
-                                imageVector = Icons.Default.Sync,
+                                imageVector = LucideIcons.Sync,
                                 contentDescription = "Sync now",
                                 tint = if (hasSyncIssue) NexusWarn else MaterialTheme.colorScheme.onSurface,
                                 modifier = Modifier.size(18.dp)
@@ -2372,7 +2373,7 @@ private fun NexusEditorialTopBar(
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Icon(
-                            imageVector = Icons.Default.MoreVert,
+                            imageVector = LucideIcons.MoreVertical,
                             contentDescription = "Chat actions menu",
                             tint = MaterialTheme.colorScheme.onSurface,
                             modifier = Modifier.size(18.dp)
@@ -2389,7 +2390,7 @@ private fun NexusEditorialTopBar(
                             text = { Text("Sync now", style = MaterialTheme.typography.bodyMedium) },
                             leadingIcon = {
                                 Icon(
-                                    imageVector = Icons.Default.Sync,
+                                    imageVector = LucideIcons.Sync,
                                     contentDescription = null,
                                     modifier = Modifier.size(18.dp)
                                 )
@@ -2405,7 +2406,7 @@ private fun NexusEditorialTopBar(
                         text = { Text("Export Markdown", style = MaterialTheme.typography.bodyMedium) },
                         leadingIcon = {
                             Icon(
-                                imageVector = Icons.Default.Download,
+                                imageVector = LucideIcons.Download,
                                 contentDescription = null,
                                 modifier = Modifier.size(18.dp)
                             )
@@ -2420,7 +2421,7 @@ private fun NexusEditorialTopBar(
                         text = { Text("Export JSON", style = MaterialTheme.typography.bodyMedium) },
                         leadingIcon = {
                             Icon(
-                                imageVector = Icons.Default.Download,
+                                imageVector = LucideIcons.Download,
                                 contentDescription = null,
                                 modifier = Modifier.size(18.dp)
                             )
@@ -2435,7 +2436,7 @@ private fun NexusEditorialTopBar(
                         text = { Text("Execution environment", style = MaterialTheme.typography.bodyMedium) },
                         leadingIcon = {
                             Icon(
-                                imageVector = Icons.Default.Terminal,
+                                imageVector = LucideIcons.Terminal,
                                 contentDescription = null,
                                 modifier = Modifier.size(18.dp)
                             )
@@ -2456,7 +2457,7 @@ private fun NexusEditorialTopBar(
                         },
                         leadingIcon = {
                             Icon(
-                                imageVector = Icons.Default.DeleteOutline,
+                                imageVector = LucideIcons.Delete,
                                 contentDescription = null,
                                 tint = NexusDanger,
                                 modifier = Modifier.size(18.dp)
@@ -2494,7 +2495,7 @@ private fun CompactGuestLimitToast(
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Icon(
-                imageVector = Icons.Default.PersonOutline,
+                imageVector = LucideIcons.User,
                 contentDescription = "Guest prompts remaining",
                 tint = NexusWarn,
                 modifier = Modifier.size(14.dp)
@@ -2571,8 +2572,8 @@ private fun CompactNotificationToast(
         ) {
             Icon(
                 imageVector = when (event.kind) {
-                    "download_done" -> Icons.Default.CheckCircle
-                    else -> Icons.Default.NotificationsActive
+                    "download_done" -> LucideIcons.CheckCircle
+                    else -> LucideIcons.BellRing
                 },
                 contentDescription = event.title,
                 tint = accentColor,
@@ -2730,7 +2731,7 @@ private fun CompactDownloadProgressToast(
                     horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Icon(
-                        imageVector = Icons.Default.CloudDownload,
+                        imageVector = LucideIcons.CloudDownload,
                         contentDescription = "Local LLM Download",
                         tint = NexusAccent,
                         modifier = Modifier.size(14.dp)

@@ -81,6 +81,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.domain.NexusToolAndRedactor
 import com.example.ui.theme.JetBrainsMonoFontFamily
+import com.example.ui.theme.LucideIcons
 import com.example.ui.theme.NexusAccent
 import com.example.ui.theme.NexusAccent2
 import com.example.ui.theme.NexusDanger
@@ -213,7 +214,7 @@ fun ChatComposer(
                         horizontalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
                         Icon(
-                            imageVector = Icons.Default.Bolt,
+                            imageVector = LucideIcons.Bolt,
                             contentDescription = "Quick command",
                             tint = NexusAccent,
                             modifier = Modifier.size(13.dp)
@@ -250,9 +251,9 @@ fun ChatComposer(
                         ) {
                             Icon(
                                 imageVector = when (item.kind) {
-                                    "history" -> Icons.Default.History
-                                    "shell" -> Icons.Default.Terminal
-                                    else -> Icons.Default.AutoAwesome
+                                    "history" -> LucideIcons.History
+                                    "shell" -> LucideIcons.Terminal
+                                    else -> LucideIcons.AutoAwesome
                                 },
                                 contentDescription = item.badge,
                                 tint = accentColor,
@@ -270,7 +271,7 @@ fun ChatComposer(
                                 modifier = Modifier.widthIn(max = 240.dp)
                             )
                             Icon(
-                                imageVector = Icons.Default.NorthWest,
+                                imageVector = LucideIcons.ArrowUpLeft,
                                 contentDescription = "Complete",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(12.dp)
@@ -319,7 +320,7 @@ fun ChatComposer(
                                     horizontalArrangement = Arrangement.spacedBy(5.dp)
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Default.Terminal,
+                                        imageVector = LucideIcons.Terminal,
                                         contentDescription = "Direct Shell Mode",
                                         tint = NexusOk,
                                         modifier = Modifier.size(12.dp)
@@ -334,7 +335,7 @@ fun ChatComposer(
                                         color = NexusOk
                                     )
                                     Icon(
-                                        imageVector = Icons.Default.Close,
+                                        imageVector = LucideIcons.Close,
                                         contentDescription = "Switch back to AI mode",
                                         tint = NexusOk,
                                         modifier = Modifier.size(12.dp)
@@ -361,7 +362,7 @@ fun ChatComposer(
                                     horizontalArrangement = Arrangement.spacedBy(4.dp)
                                 ) {
                                     Icon(
-                                        imageVector = Icons.Default.AttachFile,
+                                        imageVector = LucideIcons.AttachFile,
                                         contentDescription = "Attached file",
                                         tint = NexusAccent,
                                         modifier = Modifier.size(12.dp)
@@ -374,7 +375,7 @@ fun ChatComposer(
                                         overflow = TextOverflow.Ellipsis
                                     )
                                     Icon(
-                                        imageVector = Icons.Default.Close,
+                                        imageVector = LucideIcons.Close,
                                         contentDescription = "Remove attachment",
                                         tint = NexusAccent,
                                         modifier = Modifier.size(12.dp)
@@ -454,7 +455,7 @@ fun ChatComposer(
                         ) {
                             Box(contentAlignment = Alignment.Center) {
                                 Icon(
-                                    imageVector = Icons.Default.Add,
+                                    imageVector = LucideIcons.Add,
                                     contentDescription = "Composer tools & attachments",
                                     tint = MaterialTheme.colorScheme.onSurface,
                                     modifier = Modifier.size(19.dp)
@@ -485,7 +486,7 @@ fun ChatComposer(
                                 },
                                 leadingIcon = {
                                     Icon(
-                                        imageVector = Icons.Default.Bolt,
+                                        imageVector = LucideIcons.Bolt,
                                         contentDescription = null,
                                         tint = NexusAccent
                                     )
@@ -517,7 +518,7 @@ fun ChatComposer(
                                 },
                                 leadingIcon = {
                                     Icon(
-                                        imageVector = Icons.Default.AttachFile,
+                                        imageVector = LucideIcons.AttachFile,
                                         contentDescription = null,
                                         tint = NexusAccent
                                     )
@@ -547,7 +548,7 @@ fun ChatComposer(
                                 },
                                 leadingIcon = {
                                     Icon(
-                                        imageVector = Icons.Default.FolderOpen,
+                                        imageVector = LucideIcons.FolderOpen,
                                         contentDescription = null,
                                         tint = NexusAccent
                                     )
@@ -575,7 +576,7 @@ fun ChatComposer(
                                 },
                                 leadingIcon = {
                                     Icon(
-                                        imageVector = Icons.Default.Terminal,
+                                        imageVector = LucideIcons.Terminal,
                                         contentDescription = null,
                                         tint = if (isDirectShellInput) NexusAccent else NexusOk
                                     )
@@ -601,7 +602,7 @@ fun ChatComposer(
                                 },
                                 leadingIcon = {
                                     Icon(
-                                        imageVector = Icons.Default.KeyboardArrowUp,
+                                        imageVector = LucideIcons.ChevronUp,
                                         contentDescription = null,
                                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -617,7 +618,7 @@ fun ChatComposer(
                                             .testTag("history_next_button")
                                     ) {
                                         Icon(
-                                            imageVector = Icons.Default.KeyboardArrowDown,
+                                            imageVector = LucideIcons.ChevronDown,
                                             contentDescription = "Next in history",
                                             modifier = Modifier.size(16.dp)
                                         )
@@ -641,7 +642,7 @@ fun ChatComposer(
                                     },
                                     leadingIcon = {
                                         Icon(
-                                            imageVector = Icons.Default.AutoAwesome,
+                                            imageVector = LucideIcons.AutoAwesome,
                                             contentDescription = null,
                                             tint = NexusAccent
                                         )
@@ -684,7 +685,7 @@ fun ChatComposer(
                                     overflow = TextOverflow.Ellipsis
                                 )
                                 Icon(
-                                    imageVector = Icons.Default.KeyboardArrowDown,
+                                    imageVector = LucideIcons.ChevronDown,
                                     contentDescription = "Switch AI model",
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.size(16.dp)
@@ -700,7 +701,7 @@ fun ChatComposer(
                                 .testTag("composer_mic_button")
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Mic,
+                                imageVector = LucideIcons.Mic,
                                 contentDescription = "Voice input",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.size(19.dp)
@@ -719,7 +720,7 @@ fun ChatComposer(
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
                                     Icon(
-                                        imageVector = Icons.Default.Stop,
+                                        imageVector = LucideIcons.Stop,
                                         contentDescription = "Stop generation",
                                         tint = Color.White,
                                         modifier = Modifier.size(17.dp)
