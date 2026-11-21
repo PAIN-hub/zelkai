@@ -169,5 +169,19 @@ Every push to `master` / `main` (or manual `workflow_dispatch`) triggers the 5-s
 3. **Stage 3**: `:app:compileDebugKotlin --continue` with automatic `^e:` compiler error extraction into the GitHub Actions Job Summary
 4. **Stage 4**: `./gradlew testDebugUnitTest`
 5. **Stage 5**: `./gradlew assembleDebug` + 16 KB ELF page alignment verification + uploads the `zelkai-debug-apk` artifact (`app-debug.apk`).
+6. **Stage 6 (`master` only)**: Publishes `zelkai-latest.apk` and its SHA-256 checksum to the rolling `latest` GitHub Release for one-click downloads.
+
+---
+
+## 10. One-Click APK Download Page (`docs/index.html`)
+
+The static landing page lives under `docs/` (`docs/index.html`, `docs/styles.css`, `docs/app.js`) with zero build steps:
+
+```bash
+# Preview locally on loopback only (127.0.0.1)
+python3 -m http.server 8080 --bind 127.0.0.1 --directory docs
+```
+
+To publish on GitHub Pages, open **Repository Settings > Pages**, set **Source** to **Deploy from a branch**, and select **`master`** + **`/docs`**. The live page is served at `https://pain-hub.github.io/zelkai/`.
 
 

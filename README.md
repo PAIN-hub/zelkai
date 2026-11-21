@@ -1,8 +1,10 @@
+![ZELKAI Banner](docs/screenshots/zelkai-banner.jpg)
+
 # ZELKAI
 
 **Autonomous Linux Shell & Multi-Provider AI Coding Assistant for Android**
 
-ZELKAI (`com.zelkai.devagent`, formerly Nexus Agent v5) is a native Android developer agent built with Kotlin, Jetpack Compose, and an embedded `llama.cpp` runtime. It combines cloud LLM providers (Google Gemini, Anthropic Claude, and OpenAI) with on-device ARM64 GGUF inference, a local Linux shell and Termux execution backend, background job management, and local-first transcript persistence.
+ZELKAI (`com.zelkai.devagent` is a native Android developer agent built with Kotlin, Jetpack Compose, and an embedded `llama.cpp` runtime. It combines cloud LLM providers (Google Gemini, Anthropic Claude, and OpenAI) with on-device ARM64 GGUF inference, a local Linux shell and Termux execution backend, background job management, and local-first transcript persistence.
 
 | Specification | Details |
 | :--- | :--- |
@@ -13,6 +15,7 @@ ZELKAI (`com.zelkai.devagent`, formerly Nexus Agent v5) is a native Android deve
 | **On-Device LLM Engine** | `llama.cpp` pinned at release tag `b12020` |
 | **UI Framework** | Jetpack Compose (Material 3) |
 | **Repository** | `https://github.com/PAIN-hub/zelkai.git` |
+| **Download Page** | [https://pain-hub.github.io/zelkai/](https://pain-hub.github.io/zelkai/) (`docs/index.html`) |
 | **Author** | `beely` ([PAIN-hub](https://github.com/PAIN-hub)) |
 | **Sponsor** | [GitHub Sponsors](https://github.com/sponsors/PAIN-hub) |
 
