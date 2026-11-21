@@ -1,4 +1,4 @@
-![ZELKAI Banner](docs/screenshots/zelkai-banner.jpg)
+![ZELKAI Banner](docs/screenshots/zelkai-banner.gif)
 
 # ZELKAI
 
